@@ -7,18 +7,33 @@ use crate::{
     lexer::{Keyword, Span, Token, TokenKind},
 };
 
+mod cursor;
+mod syntax;
+
+use cursor::TokenCursor;
+pub use syntax::Syntax;
+
 pub struct Parser {
     filename: String,
-    tokens: Vec<Token>,
-    pos: usize,
+    input: TokenCursor,
+    syntax: Syntax,
 }
 
 impl Parser {
-    pub fn new(_source: &str, filename: String, tokens: Vec<Token>) -> Self {
+    pub fn new(source: &str, filename: String, tokens: Vec<Token>) -> Self {
+        Self::new_with_syntax(source, filename, tokens, Syntax::default())
+    }
+
+    pub fn new_with_syntax(
+        _source: &str,
+        filename: String,
+        tokens: Vec<Token>,
+        syntax: Syntax,
+    ) -> Self {
         Self {
             filename,
-            tokens,
-            pos: 0,
+            input: TokenCursor::new(tokens),
+            syntax,
         }
     }
 
@@ -37,7 +52,9 @@ impl Parser {
         if self.at_keyword(Keyword::Import) {
             return Ok(Stmt::Import(self.parse_raw_until_semicolon()));
         }
-        if self.at_keyword(Keyword::Type) || self.at_keyword(Keyword::Interface) {
+        if self.syntax.typescript
+            && (self.at_keyword(Keyword::Type) || self.at_keyword(Keyword::Interface))
+        {
             return self.parse_type_only().map(Stmt::TypeOnly);
         }
         if self.at_keyword(Keyword::Export) {
@@ -429,8 +446,12 @@ impl Parser {
                         span,
                     }
                 } else {
-                    self.parse_expression_until(&[TokenKind::RightParen])?;
+                    let inner = self.parse_expression_until(&[TokenKind::RightParen])?;
                     let end = self.expect(TokenKind::RightParen, "expected `)`")?.span;
+                    if matches!(inner.kind, ExprKind::Markup(_)) {
+                        let span = join_span(token.span, end);
+                        return Ok(Expr { span, ..inner });
+                    }
                     Expr {
                         kind: ExprKind::Raw,
                         span: join_span(token.span, end),
@@ -439,7 +460,7 @@ impl Parser {
             }
             TokenKind::LeftBracket => self.parse_array(token.span, stop)?,
             TokenKind::LeftBrace => self.parse_object_raw(token.span)?,
-            TokenKind::Less => self.parse_markup_after_less(token.span)?,
+            TokenKind::Less if self.syntax.markup => self.parse_markup_after_less(token.span)?,
             _ => {
                 let expr = self.parse_raw_expression_from(token.span, stop);
                 return Ok(expr);
@@ -648,7 +669,7 @@ impl Parser {
                 span: join_span(start, end),
             });
         }
-        let name_token = self.expect(TokenKind::Ident, "expected markup attribute name")?;
+        let name_token = self.expect_markup_ident("expected markup attribute name")?;
         let value = if self.matches(TokenKind::Eq) {
             if self.at(TokenKind::String) {
                 let token = self.bump();
@@ -680,14 +701,12 @@ impl Parser {
     }
 
     fn parse_markup_name(&mut self) -> Result<String, NoriError> {
-        let mut name = self
-            .expect(TokenKind::Ident, "expected markup tag name")?
-            .lexeme;
+        let mut name = self.expect_markup_ident("expected markup tag name")?.lexeme;
         while self.matches(TokenKind::Dot) {
             name.push('.');
             name.push_str(
                 &self
-                    .expect(TokenKind::Ident, "expected markup member name")?
+                    .expect_markup_ident("expected markup member name")?
                     .lexeme,
             );
         }
@@ -729,27 +748,33 @@ impl Parser {
         }
     }
 
-    fn looks_like_arrow_params(&self) -> Result<bool, NoriError> {
-        let mut idx = self.pos;
+    fn looks_like_arrow_params(&mut self) -> Result<bool, NoriError> {
+        let checkpoint = self.input.checkpoint();
         let mut depth = 1usize;
-        while idx < self.tokens.len() {
-            match self.tokens[idx].kind {
-                TokenKind::LeftParen => depth += 1,
+        loop {
+            match self.peek().kind {
+                TokenKind::LeftParen => {
+                    depth += 1;
+                    self.bump();
+                }
                 TokenKind::RightParen => {
+                    self.bump();
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        return Ok(self
-                            .tokens
-                            .get(idx + 1)
-                            .is_some_and(|token| token.kind == TokenKind::Arrow));
+                        let is_arrow = self.at(TokenKind::Arrow);
+                        self.input.rewind(checkpoint);
+                        return Ok(is_arrow);
                     }
                 }
-                TokenKind::Eof => return Ok(false),
-                _ => {}
+                TokenKind::Eof => {
+                    self.input.rewind(checkpoint);
+                    return Ok(false);
+                }
+                _ => {
+                    self.bump();
+                }
             }
-            idx += 1;
         }
-        Err(self.error_here("unterminated parenthesized expression"))
     }
 
     fn collect_arrow_params(&mut self) -> Result<Vec<String>, NoriError> {
@@ -854,6 +879,14 @@ impl Parser {
         }
     }
 
+    fn expect_markup_ident(&mut self, message: &str) -> Result<Token, NoriError> {
+        if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+            Ok(self.bump())
+        } else {
+            Err(self.error_here(message))
+        }
+    }
+
     fn matches(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump();
@@ -889,21 +922,19 @@ impl Parser {
     }
 
     fn bump(&mut self) -> Token {
-        let token = self.peek().clone();
-        self.pos += 1;
-        token
+        self.input.bump()
     }
 
     fn peek(&self) -> &Token {
-        &self.tokens[self.pos]
+        self.input.peek()
     }
 
     fn previous(&self) -> &Token {
-        &self.tokens[self.pos.saturating_sub(1)]
+        self.input.previous()
     }
 
     fn peek_next_kind(&self) -> Option<TokenKind> {
-        self.tokens.get(self.pos + 1).map(|token| token.kind)
+        self.input.peek_next_kind()
     }
 
     fn error_here(&self, message: &str) -> NoriError {

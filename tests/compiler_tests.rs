@@ -1,9 +1,16 @@
-use nori::{CompileOptions, analyze_source, compile_source, lexer::lex, parse_source};
+use nori::{
+    CompileOptions, analyze_source, compile_source,
+    lexer::lex,
+    parse_source,
+    parser::{Parser, Syntax},
+};
 use std::process::Command;
 
 #[test]
 fn lexer_tracks_markup_text_and_spans() {
-    let tokens = lex("return <button onclick={() => count.value += 1}>Click</button>;").unwrap();
+    let tokens =
+        lex("return <button type=\"button\" onclick={() => count.value += 1}>Click</button>;")
+            .unwrap();
 
     assert!(tokens.iter().any(|token| token.lexeme == "button"));
     assert!(tokens.iter().any(|token| token.lexeme == "Click"));
@@ -17,6 +24,66 @@ fn parser_builds_component_ast() {
     let program = parse_source(source, "Counter.nori").unwrap();
 
     assert!(!program.body.is_empty());
+}
+
+#[test]
+fn parser_accepts_explicit_nori_syntax_config() {
+    let source = include_str!("../examples/Counter.nori");
+    let tokens = lex(source).unwrap();
+    let program =
+        Parser::new_with_syntax(source, "Counter.nori".to_string(), tokens, Syntax::nori())
+            .parse_program()
+            .unwrap();
+
+    assert!(!program.body.is_empty());
+}
+
+#[test]
+fn parser_accepts_keyword_markup_attributes() {
+    let source = r#"export default function Button() {
+  return <button type="button">Click</button>;
+}"#;
+
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(
+        output
+            .code
+            .contains(r#"<button type="button">Click</button>"#)
+    );
+}
+
+#[test]
+fn codegen_defaults_button_type_when_missing() {
+    let source = r#"export default function Button() {
+  return (
+    <button onclick={save}>Save</button>
+  );
+}"#;
+
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(
+        output
+            .code
+            .contains(r#"<button type="button" onclick={save}>Save</button>"#)
+    );
+}
+
+#[test]
+fn codegen_preserves_explicit_button_type() {
+    let source = r#"export default function Button() {
+  return <button type="submit">Save</button>;
+}"#;
+
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(
+        output
+            .code
+            .contains(r#"<button type="submit">Save</button>"#)
+    );
+    assert!(!output.code.contains(r#"type="button" type="submit""#));
 }
 
 #[test]

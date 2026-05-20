@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use crate::{
     CompileOptions,
     analyzer::{Analysis, primitive_call_name},
-    ast::{BlockStmt, Expr, ExprKind, FunctionDecl, IfStmt, Program, Stmt, VarDecl, VarKind},
+    ast::{
+        BlockStmt, Expr, ExprKind, FunctionDecl, IfStmt, MarkupAttribute, MarkupChild,
+        MarkupElement, MarkupNode, Program, Stmt, VarDecl, VarKind,
+    },
 };
 
 pub fn generate(
@@ -214,9 +217,69 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             }
             out.push(']');
         }
-        ExprKind::Object | ExprKind::Markup(_) | ExprKind::Raw => {
+        ExprKind::Markup(node) => emit_markup_source(source, node, out),
+        ExprKind::Object | ExprKind::Raw => {
             out.push_str(source_slice(source, expr.span.start, expr.span.end).trim());
         }
+    }
+}
+
+fn emit_markup_source(source: &str, node: &MarkupNode, out: &mut String) {
+    let span = markup_span(node);
+    let mut text = source_slice(source, span.start, span.end).to_string();
+    let mut insertions = Vec::new();
+    collect_button_type_insertions(node, &mut insertions);
+    insertions.sort_unstable_by(|a, b| b.cmp(a));
+
+    for insertion in insertions {
+        if (span.start..=span.end).contains(&insertion) {
+            text.insert_str(insertion - span.start, r#" type="button""#);
+        }
+    }
+
+    out.push_str(text.trim());
+}
+
+fn collect_button_type_insertions(node: &MarkupNode, insertions: &mut Vec<usize>) {
+    match node {
+        MarkupNode::Element(element) => {
+            collect_button_type_insertions_from_element(element, insertions)
+        }
+        MarkupNode::Fragment { children, .. } => {
+            for child in children {
+                collect_button_type_insertions_from_child(child, insertions);
+            }
+        }
+    }
+}
+
+fn collect_button_type_insertions_from_element(
+    element: &MarkupElement,
+    insertions: &mut Vec<usize>,
+) {
+    if element.name == "button"
+        && !element.attributes.iter().any(|attribute| {
+            matches!(attribute, MarkupAttribute::Named { name, .. } if name.eq_ignore_ascii_case("type"))
+        })
+    {
+        insertions.push(element.span.start + 1 + element.name.len());
+    }
+
+    for child in &element.children {
+        collect_button_type_insertions_from_child(child, insertions);
+    }
+}
+
+fn collect_button_type_insertions_from_child(child: &MarkupChild, insertions: &mut Vec<usize>) {
+    if let MarkupChild::Node(node) = child {
+        collect_button_type_insertions(node, insertions);
+    }
+}
+
+fn markup_span(node: &MarkupNode) -> crate::lexer::Span {
+    match node {
+        MarkupNode::Element(element) => element.span,
+        MarkupNode::Fragment { span, .. } => *span,
     }
 }
 
