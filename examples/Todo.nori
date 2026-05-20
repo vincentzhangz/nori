@@ -15,7 +15,7 @@ export default function TodoList() {
   return (
     <section class="space-y-4">
       <input value={draft.value} oninput={(event) => draft.value = event.target.value} />
-      <button onclick={addTodo}>Add</button>
+      <button type="button" onclick={addTodo}>Add</button>
       <ul>{todos.value.map((todo) => <li>{todo.title}</li>)}</ul>
     </section>
   );

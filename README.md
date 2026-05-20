@@ -43,7 +43,7 @@ Nori is experimental and not production-ready.
 Current capabilities:
 
 - Hand-written lexer with source spans.
-- Custom recursive descent parser with Pratt-style expression parsing.
+- Custom recursive descent parser with Pratt-style expression parsing and SWC-style parser internals.
 - Custom Nori AST for statements, expressions, functions, and element boundaries.
 - Reactivity analyzer for `$state`, `$derived`, and `$effect`.
 - Code generator that strips supported type syntax and preserves component markup.
@@ -129,7 +129,7 @@ See [Language Subset](docs/language-subset.md) for details.
 ```text
 src/
   lexer.rs       tokens and spans
-  parser.rs      recursive descent parser
+  parser.rs      recursive descent parser entrypoint
   ast.rs         custom Nori AST
   analyzer.rs    reactivity analysis
   codegen.rs     JavaScript output

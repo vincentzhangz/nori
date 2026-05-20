@@ -32,6 +32,8 @@ The parser is hand-written. It uses:
 
 - Recursive descent for programs, statements, functions, blocks, variable declarations, and component markup.
 - Pratt-style precedence parsing for expressions.
+- A SWC-inspired token cursor with checkpoints for speculative parsing.
+- A `Syntax::nori()` configuration entrypoint for Nori's TypeScript and markup subset.
 
 The parser produces the custom AST in `src/ast.rs`.
 
