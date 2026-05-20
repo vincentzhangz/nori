@@ -1,0 +1,16 @@
+{
+  "name": "@nori/rspack-plugin",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "scripts": {
+    "build": "node --check src/index.js",
+    "typecheck": "node --check src/index.js"
+  }
+}

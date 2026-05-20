@@ -1,0 +1,12 @@
+const count: number = $state(0);
+const doubled = $derived(count.value * 2);
+
+export default function Counter() {
+  return (
+    <div class="p-4">
+      <p>Count: {count.value}</p>
+      <p>Doubled: {doubled.value}</p>
+      <button onclick={() => count.value += 1}>Increment</button>
+    </div>
+  );
+}

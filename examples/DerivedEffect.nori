@@ -1,0 +1,8 @@
+const count = $state(1);
+const doubled = $derived(count.value * 2);
+
+$effect(() => console.log("count changed", count.value));
+
+export default function DerivedEffect() {
+  return <p>{count.value} / {doubled.value}</p>;
+}

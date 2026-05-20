@@ -1,0 +1,17 @@
+{
+  "name": "nori-workspace",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run --cwd packages/core build && bun run --cwd packages/cli build && bun run --cwd packages/vite-plugin build && bun run --cwd packages/rspack-plugin build",
+    "test": "cargo test && bun test",
+    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/cli typecheck && bun run --cwd packages/vite-plugin typecheck && bun run --cwd packages/rspack-plugin typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

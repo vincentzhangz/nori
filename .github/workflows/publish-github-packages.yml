@@ -1,0 +1,119 @@
+name: Publish GitHub Packages
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+
+      - name: Install JavaScript dependencies
+        run: bun install
+
+      - name: Run verification
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
+          bun test
+          bun run build
+
+  build-macos:
+    name: Build macOS CLI binaries
+    runs-on: macos-latest
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            binary: nori-darwin-arm64
+          - target: x86_64-apple-darwin
+            binary: nori-darwin-x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/nori dist/${{ matrix.binary }}
+          chmod +x dist/${{ matrix.binary }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
+
+  publish:
+    name: Publish npm packages
+    runs-on: macos-latest
+    needs: build-macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+
+      - name: Install JavaScript dependencies
+        run: bun install
+
+      - name: Build JavaScript packages
+        run: bun run build
+
+      - name: Download macOS binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nori-darwin-*
+          path: packages/cli/bin
+          merge-multiple: true
+
+      - name: Mark CLI binaries executable
+        run: chmod +x packages/cli/bin/nori-darwin-*
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm publish packages/core --access public
+          npm publish packages/cli --access public
+          npm publish packages/vite-plugin --access public
+          npm publish packages/rspack-plugin --access public

@@ -1,0 +1,45 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "nori-workspace",
+      "devDependencies": {
+        "typescript": "^6.0.3",
+      },
+    },
+    "packages/cli": {
+      "name": "@nori/cli",
+      "version": "0.1.0",
+      "bin": {
+        "nori": "./src/nori.js",
+      },
+    },
+    "packages/core": {
+      "name": "@nori/core",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^6.0.3",
+      },
+    },
+    "packages/rspack-plugin": {
+      "name": "@nori/rspack-plugin",
+      "version": "0.1.0",
+    },
+    "packages/vite-plugin": {
+      "name": "@nori/vite-plugin",
+      "version": "0.1.0",
+    },
+  },
+  "packages": {
+    "@nori/cli": ["@nori/cli@workspace:packages/cli"],
+
+    "@nori/core": ["@nori/core@workspace:packages/core"],
+
+    "@nori/rspack-plugin": ["@nori/rspack-plugin@workspace:packages/rspack-plugin"],
+
+    "@nori/vite-plugin": ["@nori/vite-plugin@workspace:packages/vite-plugin"],
+
+    "typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+  }
+}
