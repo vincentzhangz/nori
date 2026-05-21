@@ -23,7 +23,7 @@ jobs:
           components: rustfmt
 
       - name: Check Rust formatting
-        run: cargo fmt --check --workspace
+        run: cargo fmt --check --all
 
   lint:
     name: Lint

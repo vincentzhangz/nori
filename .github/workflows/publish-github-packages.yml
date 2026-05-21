@@ -35,7 +35,7 @@ jobs:
 
       - name: Run verification
         run: |
-          cargo fmt --check --workspace
+          cargo fmt --check --all
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace --locked
           bun test
