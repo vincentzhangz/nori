@@ -1,8 +1,4 @@
-import { readFileSync } from "node:fs";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { runNori } from "../../cli/src/index.js";
+import { runNoriStdin } from "../../cli/src/index.js";
 
 export class NoriRspackPlugin {
   constructor(options = {}) {
@@ -14,31 +10,29 @@ export class NoriRspackPlugin {
     const runtimeImport = this.options.runtimeImport ?? "@nori/core";
     const include = this.options.include ?? /\.nori$/;
 
-    compiler.hooks.thisCompilation.tap(pluginName, (compilation) => {
-      compilation.hooks.processAssets.tap(
-        {
-          name: pluginName,
-          stage: compiler.webpack.Compilation.PROCESS_ASSETS_STAGE_ADDITIONS
-        },
-        () => {
-          for (const module of compilation.modules) {
-            const resource = module.resource;
-            if (!resource || !include.test(resource)) {
-              continue;
-            }
-            const source = readFileSync(resource, "utf8");
-            const dir = mkdtempSync(join(tmpdir(), "nori-"));
-            const input = join(dir, "input.nori");
-            writeFileSync(input, source);
-            try {
-              runNori(["compile", input, "--runtime-import", runtimeImport]);
-            } finally {
-              rmSync(dir, { recursive: true, force: true });
-            }
-          }
-        }
-      );
+    compiler.options.module.rules.push({
+      test: include,
+      use: {
+        loader: require.resolve("./loader.js"),
+        options: { runtimeImport }
+      }
     });
+  }
+}
+
+export function loader(source) {
+  const options = this.getOptions() || {};
+  const runtimeImport = options.runtimeImport ?? "@nori/core";
+
+  try {
+    const result = runNoriStdin(source, [
+      "--runtime-import",
+      runtimeImport,
+      this.resourcePath || "input.nori"
+    ]);
+    return result;
+  } catch (error) {
+    throw new Error(`Nori loader failed: ${error.message}`);
   }
 }
 

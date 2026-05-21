@@ -1,4 +1,4 @@
-use crate::lexer::{Token, TokenKind};
+use nori_lexer::{Token, TokenKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserCheckpoint {

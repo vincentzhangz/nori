@@ -1,7 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { runNori } from "../../cli/src/index.js";
+import { runNoriStdin } from "../../cli/src/index.js";
 
 export default function nori(options = {}) {
   const include = options.include ?? /\.nori$/;
@@ -15,20 +12,12 @@ export default function nori(options = {}) {
         return null;
       }
 
-      const dir = mkdtempSync(join(tmpdir(), "nori-"));
-      const input = join(dir, "input.nori");
-      writeFileSync(input, code);
-      try {
-        const compiled = runNori([
-          "compile",
-          input,
-          "--runtime-import",
-          runtimeImport
-        ]);
-        return { code: compiled, map: null };
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+      const compiled = runNoriStdin(code, [
+        "--runtime-import",
+        runtimeImport,
+        "dummy.nori"
+      ]);
+      return { code: compiled, map: null };
     }
   };
 }

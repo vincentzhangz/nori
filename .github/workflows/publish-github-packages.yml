@@ -35,9 +35,9 @@ jobs:
 
       - name: Run verification
         run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test --locked
+          cargo fmt --check --workspace
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --locked
           bun test
           bun run build
 
@@ -62,7 +62,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --workspace --locked --target ${{ matrix.target }}
 
       - name: Stage binary
         run: |

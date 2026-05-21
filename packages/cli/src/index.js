@@ -23,6 +23,25 @@ export function runNori(args, options = {}) {
 	return result.stdout;
 }
 
+export function runNoriStdin(code, args = [], options = {}) {
+	const command = resolveBinary();
+	const fullArgs = ["compile", "--stdin", ...args];
+	const result = spawnSync(command.bin, fullArgs, {
+		cwd: command.cwd,
+		encoding: "utf8",
+		input: code,
+		...options,
+	});
+
+	if (result.status !== 0) {
+		const error = new Error(result.stderr || "nori command failed");
+		error.result = result;
+		throw error;
+	}
+
+	return result.stdout;
+}
+
 function resolveBinary() {
 	const binaryName = `nori-${process.platform}-${process.arch}`;
 	const extension = process.platform === "win32" ? ".exe" : "";

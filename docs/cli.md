@@ -5,7 +5,7 @@ The Rust binary is named `nori`.
 During local development, run it through Cargo:
 
 ```sh
-cargo run -- <command>
+cargo run -p nori -- <command>
 ```
 
 ## Commands
@@ -13,43 +13,43 @@ cargo run -- <command>
 Compile a file and print output:
 
 ```sh
-cargo run -- compile examples/Counter.nori
+cargo run -p nori -- compile examples/Counter.nori
 ```
 
 Compile a file to a directory:
 
 ```sh
-cargo run -- compile examples/Counter.nori -o dist/
+cargo run -p nori -- compile examples/Counter.nori -o dist/
 ```
 
 Compile a file to a specific output file:
 
 ```sh
-cargo run -- compile examples/Counter.nori -o dist/Counter.js
+cargo run -p nori -- compile examples/Counter.nori -o dist/Counter.js
 ```
 
 Watch a file and recompile on changes:
 
 ```sh
-cargo run -- watch examples/Counter.nori -o dist/
+cargo run -p nori -- watch examples/Counter.nori -o dist/
 ```
 
 Print tokens:
 
 ```sh
-cargo run -- lex examples/Counter.nori
+cargo run -p nori -- lex examples/Counter.nori
 ```
 
 Print the parsed AST:
 
 ```sh
-cargo run -- parse examples/Counter.nori
+cargo run -p nori -- parse examples/Counter.nori
 ```
 
 Use a custom runtime import:
 
 ```sh
-cargo run -- compile examples/Counter.nori --runtime-import "@/nori/core"
+cargo run -p nori -- compile examples/Counter.nori --runtime-import "@/nori/core"
 ```
 
 ## Output Format

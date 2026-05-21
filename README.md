@@ -63,7 +63,7 @@ Requirements:
 Clone the repo and run the tests:
 
 ```sh
-cargo test
+cargo test --workspace
 bun test
 ```
 
@@ -76,25 +76,25 @@ bun run test
 Compile an example:
 
 ```sh
-cargo run -- compile examples/Counter.nori
+cargo run -p nori -- compile examples/Counter.nori
 ```
 
 Write compiled output to a directory:
 
 ```sh
-cargo run -- compile examples/Counter.nori -o dist/
+cargo run -p nori -- compile examples/Counter.nori -o dist/
 ```
 
 Inspect tokens:
 
 ```sh
-cargo run -- lex examples/Counter.nori
+cargo run -p nori -- lex examples/Counter.nori
 ```
 
 Inspect the parsed AST:
 
 ```sh
-cargo run -- parse examples/Counter.nori
+cargo run -p nori -- parse examples/Counter.nori
 ```
 
 ## Reactivity Model
@@ -124,32 +124,6 @@ Nori V1 supports a small component syntax subset:
 
 See [Language Subset](docs/language-subset.md) for details.
 
-## Project Layout
-
-```text
-src/
-  lexer.rs       tokens and spans
-  parser.rs      recursive descent parser entrypoint
-  ast.rs         custom Nori AST
-  analyzer.rs    reactivity analysis
-  codegen.rs     JavaScript output
-  diagnostic.rs  errors
-  lib.rs         public compiler API
-  main.rs        CLI
-
-packages/
-  core/          @nori/core runtime
-  cli/           @nori/cli wrapper
-  vite-plugin/   Vite plugin scaffold
-  rspack-plugin/ Rspack plugin scaffold
-
-examples/
-  Counter.nori
-  Todo.nori
-  ShadcnCard.nori
-  DerivedEffect.nori
-```
-
 ## Documentation
 
 - [Compiler Pipeline](docs/compiler-pipeline.md)
@@ -163,16 +137,16 @@ examples/
 Useful commands:
 
 ```sh
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 bun test
 ```
 
 Recommended workflow:
 
 1. Add or update a `.nori` fixture in `examples/`.
-2. Add parser/codegen expectations in `tests/compiler_tests.rs`.
+2. Add parser/codegen expectations in `crates/nori/tests/compiler_tests.rs`.
 3. Run the Rust tests.
 4. Run the Bun runtime tests if runtime behavior changed.
 

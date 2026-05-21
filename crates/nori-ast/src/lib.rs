@@ -1,4 +1,10 @@
-use crate::lexer::Span;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -9,6 +15,7 @@ pub struct Program {
 pub enum Stmt {
     Import(RawStmt),
     TypeOnly(RawStmt),
+    Class(ClassDecl),
     Var(VarDecl),
     Function(FunctionDecl),
     ExportDefaultFunction(FunctionDecl),
@@ -17,7 +24,36 @@ pub enum Stmt {
     Expr(Expr),
     Block(BlockStmt),
     If(IfStmt),
+    Try(TryStmt),
+    For(ForStmt),
     Raw(RawStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryStmt {
+    pub body: BlockStmt,
+    pub catch_param: Option<String>,
+    pub catch_body: BlockStmt,
+    pub finally_body: Option<BlockStmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForStmt {
+    pub variable: VarKind,
+    pub name: String,
+    pub iterable: Expr,
+    pub is_of: bool,
+    pub body: BlockStmt,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDecl {
+    pub name: String,
+    pub extends: Option<String>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +92,14 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDeclarator {
     pub name: String,
+    pub pattern: Option<DestructuringPattern>,
     pub init: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestructuringPattern {
+    pub kind: DestructuringKind,
     pub span: Span,
 }
 
@@ -65,6 +108,8 @@ pub struct FunctionDecl {
     pub name: Option<String>,
     pub params: Vec<Param>,
     pub body: BlockStmt,
+    pub async_token: Option<Span>,
+    pub decorators: Vec<Span>,
     pub span: Span,
 }
 
@@ -114,14 +159,28 @@ pub enum ExprKind {
         object: Box<Expr>,
         property: String,
     },
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
     Arrow {
         params: Vec<String>,
         body: Box<Expr>,
     },
     Array(Vec<Expr>),
     Object,
+    Spread {
+        expr: Box<Expr>,
+    },
+    Await(Box<Expr>),
     Markup(MarkupNode),
     Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestructuringKind {
+    Array(Vec<String>, Span),
+    Object(Vec<(String, Option<String>)>, Span),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

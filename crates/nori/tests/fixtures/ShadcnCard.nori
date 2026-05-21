@@ -1,0 +1,18 @@
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+const count = $state(0);
+
+export default function ShadcnCard() {
+  return (
+    <Card class={cn("w-[350px]", count.value > 5 && "border-emerald-500")}>
+      <CardHeader>
+        <CardTitle>Nori Counter</CardTitle>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-4">
+        <Button onclick={() => count.value += 1}>Clicked {count.value} times</Button>
+      </CardContent>
+    </Card>
+  );
+}

@@ -1,0 +1,11 @@
+[package]
+name = "nori-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+nori-ast = { path = "../nori-ast" }
+nori-lexer = { path = "../nori-lexer" }
+nori-diagnostic = { path = "../nori-diagnostic" }

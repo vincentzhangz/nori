@@ -1,12 +1,5 @@
-use crate::diagnostic::{NoriError, span as source_span};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-    pub line: usize,
-    pub column: usize,
-}
+use nori_diagnostic::{NoriError, span as source_span};
+use nori_ast::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -28,8 +21,18 @@ pub enum Keyword {
     Return,
     If,
     Else,
+    Try,
+    Catch,
+    Finally,
+    For,
+    In,
+    Of,
+    Async,
+    Await,
     Type,
     Interface,
+    Class,
+    Extends,
     True,
     False,
     Null,
@@ -53,6 +56,7 @@ pub enum TokenKind {
     Slash,
     SlashGreater,
     Dot,
+    DotDotDot,
     Comma,
     Colon,
     Semicolon,
@@ -62,6 +66,9 @@ pub enum TokenKind {
     Star,
     Percent,
     Bang,
+    At,
+    Dollar,
+    BackTick,
     Eq,
     EqEq,
     BangEq,
@@ -73,7 +80,10 @@ pub enum TokenKind {
     SlashEq,
     AndAnd,
     OrOr,
+    Pipe,
+    Ampersand,
     Arrow,
+    DotDot,
     Ellipsis,
     Eof,
 }
@@ -214,8 +224,12 @@ impl<'a> Lexer<'a> {
                 }
             }
             '.' => {
-                if self.matches('.') && self.matches('.') {
-                    TokenKind::Ellipsis
+                if self.matches('.') {
+                    if self.matches('.') {
+                        TokenKind::Ellipsis
+                    } else {
+                        TokenKind::DotDot
+                    }
                 } else {
                     TokenKind::Dot
                 }
@@ -246,6 +260,14 @@ impl<'a> Lexer<'a> {
                 }
             }
             '%' => TokenKind::Percent,
+            '$' => {
+                if let Some(next) = self.peek() {
+                    if next.is_ascii_alphabetic() || next == '_' || next == '$' {
+                        return Ok(self.lex_ident(start));
+                    }
+                }
+                TokenKind::Dollar
+            }
             '!' => {
                 if self.matches('=') {
                     TokenKind::BangEq
@@ -253,6 +275,8 @@ impl<'a> Lexer<'a> {
                     TokenKind::Bang
                 }
             }
+            '@' => TokenKind::At,
+            '`' => TokenKind::BackTick,
             '=' => {
                 if self.matches('>') {
                     TokenKind::Arrow
@@ -263,8 +287,10 @@ impl<'a> Lexer<'a> {
                 }
             }
             '&' if self.matches('&') => TokenKind::AndAnd,
+            '&' => TokenKind::Ampersand,
             '|' if self.matches('|') => TokenKind::OrOr,
-            '\'' | '"' | '`' => return self.lex_string(start, ch),
+            '|' => TokenKind::Pipe,
+            '\'' | '"' => return self.lex_string(start, ch),
             c if c.is_ascii_digit() => return Ok(self.lex_number(start)),
             c if is_ident_start(c) => return Ok(self.lex_ident(start)),
             _ => {
@@ -312,6 +338,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_string(&mut self, start: usize, quote: char) -> Result<Token, NoriError> {
+        if quote == '`' {
+            return self.lex_template_literal(start);
+        }
         while let Some(ch) = self.peek() {
             if ch == quote {
                 self.advance();
@@ -329,6 +358,41 @@ impl<'a> Lexer<'a> {
 
         Err(NoriError::Lex {
             message: "unterminated string literal".to_string(),
+            span: source_span(start, self.pos),
+        })
+    }
+
+    fn lex_template_literal(&mut self, start: usize) -> Result<Token, NoriError> {
+        let mut brace_depth = 0;
+        while let Some(ch) = self.peek() {
+            match ch {
+                '`' => {
+                    self.advance();
+                    return Ok(self.make_token(TokenKind::String, start, self.pos));
+                }
+                '$' if self.peek_next() == Some('{') => {
+                    self.advance();
+                    self.advance();
+                    brace_depth += 1;
+                }
+                '}' if brace_depth > 0 => {
+                    self.advance();
+                    brace_depth -= 1;
+                }
+                '\\' => {
+                    self.advance();
+                    if !self.is_at_end() {
+                        self.advance();
+                    }
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+
+        Err(NoriError::Lex {
+            message: "unterminated template literal".to_string(),
             span: source_span(start, self.pos),
         })
     }
@@ -480,8 +544,18 @@ fn keyword(text: &str) -> Option<Keyword> {
         "return" => Keyword::Return,
         "if" => Keyword::If,
         "else" => Keyword::Else,
+        "try" => Keyword::Try,
+        "catch" => Keyword::Catch,
+        "finally" => Keyword::Finally,
+        "for" => Keyword::For,
+        "in" => Keyword::In,
+        "of" => Keyword::Of,
+        "async" => Keyword::Async,
+        "await" => Keyword::Await,
         "type" => Keyword::Type,
         "interface" => Keyword::Interface,
+        "class" => Keyword::Class,
+        "extends" => Keyword::Extends,
         "true" => Keyword::True,
         "false" => Keyword::False,
         "null" => Keyword::Null,

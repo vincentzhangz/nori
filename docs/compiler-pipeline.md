@@ -35,7 +35,7 @@ The parser is hand-written. It uses:
 - A SWC-inspired token cursor with checkpoints for speculative parsing.
 - A `Syntax::nori()` configuration entrypoint for Nori's TypeScript and markup subset.
 
-The parser produces the custom AST in `src/ast.rs`.
+The parser produces the custom AST in `crates/nori-ast/src/lib.rs`.
 
 ## Analyzer
 

@@ -10,7 +10,7 @@
 Run Rust tests:
 
 ```sh
-cargo test
+cargo test --workspace
 ```
 
 Run Bun tests:
@@ -28,21 +28,21 @@ bun run test
 Run strict Rust linting:
 
 ```sh
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Format Rust code:
 
 ```sh
-cargo fmt
+cargo fmt --workspace
 ```
 
 ## Suggested Workflow
 
 1. Add or update a `.nori` fixture in `examples/`.
-2. Add parser/codegen expectations in `tests/compiler_tests.rs`.
-3. Run `cargo test`.
-4. Run `cargo clippy --all-targets -- -D warnings`.
+2. Add parser/codegen expectations in `crates/nori/tests/compiler_tests.rs`.
+3. Run `cargo test --workspace`.
+4. Run `cargo clippy --workspace --all-targets -- -D warnings`.
 5. Run `bun test` if runtime behavior changed.
 
 ## Design Rule

@@ -1,0 +1,10 @@
+[package]
+name = "nori-diagnostic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+miette = { version = "7.4", features = ["fancy"] }
+thiserror = "2.0"

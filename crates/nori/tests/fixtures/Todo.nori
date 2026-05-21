@@ -1,0 +1,22 @@
+type Todo = {
+  id: number;
+  title: string;
+};
+
+const todos: Todo[] = $state([]);
+const draft = $state("");
+
+function addTodo(): void {
+  todos.value = [...todos.value, { id: todos.value.length + 1, title: draft.value }];
+  draft.value = "";
+}
+
+export default function TodoList() {
+  return (
+    <section class="space-y-4">
+      <input value={draft.value} oninput={(event) => draft.value = event.target.value} />
+      <button type="button" onclick={addTodo}>Add</button>
+      <ul>{todos.value.map((todo) => <li>{todo.title}</li>)}</ul>
+    </section>
+  );
+}

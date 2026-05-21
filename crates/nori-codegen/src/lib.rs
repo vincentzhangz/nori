@@ -1,28 +1,31 @@
 use std::collections::BTreeSet;
 
-use crate::{
-    CompileOptions,
-    analyzer::{Analysis, primitive_call_name},
-    ast::{
-        BlockStmt, Expr, ExprKind, FunctionDecl, IfStmt, MarkupAttribute, MarkupChild,
-        MarkupElement, MarkupNode, Program, Stmt, VarDecl, VarKind,
-    },
+use nori_analyzer::{Analysis, primitive_call_name};
+use nori_ast::{
+    BlockStmt, DestructuringKind, DestructuringPattern, Expr, ExprKind, ForStmt, FunctionDecl,
+    IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Program, Span, Stmt, TryStmt,
+    VarDecl, VarKind,
 };
+
+#[derive(Debug, Clone)]
+pub struct CompileOptions {
+    pub runtime_import: String,
+}
 
 pub fn generate(
     source: &str,
     program: &Program,
     analysis: &Analysis,
-    options: &CompileOptions,
+    runtime_import_path: &str,
 ) -> String {
     let mut out = String::new();
     let mut emitted_runtime = false;
 
-    if !analysis.runtime_symbols.is_empty() && !has_runtime_import(source, &options.runtime_import)
+    if !analysis.runtime_symbols.is_empty() && !has_runtime_import(source, runtime_import_path)
     {
-        out.push_str(&runtime_import(
+        out.push_str(&runtime_import_fn(
             &analysis.runtime_symbols,
-            &options.runtime_import,
+            runtime_import_path,
         ));
         out.push('\n');
         emitted_runtime = true;
@@ -70,6 +73,23 @@ fn emit_stmt(source: &str, stmt: &Stmt, out: &mut String, indent: usize) {
         }
         Stmt::Block(block) => emit_block(source, block, out, indent),
         Stmt::If(stmt) => emit_if(source, stmt, out, indent),
+        Stmt::Class(class) => {
+            push_indent(out, indent);
+            out.push_str("class ");
+            out.push_str(&class.name);
+            if let Some(extends) = &class.extends {
+                out.push_str(" extends ");
+                out.push_str(extends);
+            }
+            out.push_str(" { ");
+            for stmt in &class.body {
+                emit_stmt(source, stmt, out, 0);
+                out.push(' ');
+            }
+            out.push('}');
+        }
+        Stmt::Try(stmt) => emit_try(source, stmt, out, indent),
+        Stmt::For(stmt) => emit_for(source, stmt, out, indent),
     }
 }
 
@@ -85,13 +105,46 @@ fn emit_var(source: &str, var: &VarDecl, out: &mut String, indent: usize) {
         if idx > 0 {
             out.push_str(", ");
         }
-        out.push_str(&declarator.name);
+        if let Some(pattern) = &declarator.pattern {
+            emit_destructuring_pattern(pattern, out);
+        } else {
+            out.push_str(&declarator.name);
+        }
         if let Some(init) = &declarator.init {
             out.push_str(" = ");
             emit_expr(source, init, out);
         }
     }
     out.push(';');
+}
+
+fn emit_destructuring_pattern(pattern: &DestructuringPattern, out: &mut String) {
+    match &pattern.kind {
+        DestructuringKind::Array(names, _) => {
+            out.push('[');
+            for (idx, name) in names.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(name);
+            }
+            out.push(']');
+        }
+        DestructuringKind::Object(props, _) => {
+            out.push('{');
+            for (idx, (name, default)) in props.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(name);
+                if let Some(default) = default {
+                    out.push_str(" = ");
+                    out.push_str(default);
+                }
+            }
+            out.push('}');
+        }
+    }
 }
 
 fn emit_function(
@@ -104,6 +157,9 @@ fn emit_function(
     push_indent(out, indent);
     if export_default {
         out.push_str("export default ");
+    }
+    if function.async_token.is_some() {
+        out.push_str("async ");
     }
     out.push_str("function");
     if let Some(name) = &function.name {
@@ -145,6 +201,38 @@ fn emit_if(source: &str, stmt: &IfStmt, out: &mut String, indent: usize) {
         out.push_str(" else ");
         emit_stmt(source, alternate, out, 0);
     }
+}
+
+fn emit_try(source: &str, stmt: &TryStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("try ");
+    emit_block(source, &stmt.body, out, indent);
+    if let Some(param) = &stmt.catch_param {
+        out.push_str(&format!(" catch ({param}) "));
+        emit_block(source, &stmt.catch_body, out, indent);
+    } else if !stmt.catch_body.body.is_empty() {
+        out.push_str(" catch ");
+        emit_block(source, &stmt.catch_body, out, indent);
+    }
+    if let Some(finally_body) = &stmt.finally_body {
+        out.push_str(" finally ");
+        emit_block(source, finally_body, out, indent);
+    }
+}
+
+fn emit_for(source: &str, stmt: &ForStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("for (");
+    out.push_str(match stmt.variable {
+        VarKind::Const => "const ",
+        VarKind::Let => "let ",
+        VarKind::Var => "var ",
+    });
+    out.push_str(&stmt.name);
+    out.push_str(if stmt.is_of { " of " } else { " in " });
+    emit_expr(source, &stmt.iterable, out);
+    out.push_str(") ");
+    emit_block(source, &stmt.body, out, indent);
 }
 
 fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
@@ -196,6 +284,12 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             out.push('.');
             out.push_str(property);
         }
+        ExprKind::Index { object, index } => {
+            emit_expr(source, object, out);
+            out.push('[');
+            emit_expr(source, index, out);
+            out.push(']');
+        }
         ExprKind::Arrow { params, body } => {
             if params.len() == 1 {
                 out.push_str(&params[0]);
@@ -216,6 +310,14 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
                 emit_expr(source, item, out);
             }
             out.push(']');
+        }
+        ExprKind::Spread { expr } => {
+            out.push_str("...");
+            emit_expr(source, expr, out);
+        }
+        ExprKind::Await(expr) => {
+            out.push_str("await ");
+            emit_expr(source, expr, out);
         }
         ExprKind::Markup(node) => emit_markup_source(source, node, out),
         ExprKind::Object | ExprKind::Raw => {
@@ -276,7 +378,7 @@ fn collect_button_type_insertions_from_child(child: &MarkupChild, insertions: &m
     }
 }
 
-fn markup_span(node: &MarkupNode) -> crate::lexer::Span {
+fn markup_span(node: &MarkupNode) -> Span {
     match node {
         MarkupNode::Element(element) => element.span,
         MarkupNode::Fragment { span, .. } => *span,
@@ -323,7 +425,7 @@ fn has_runtime_import(source: &str, runtime_import: &str) -> bool {
         || source.contains(&format!("from \"{runtime_import}\""))
 }
 
-fn runtime_import(symbols: &BTreeSet<String>, runtime_import: &str) -> String {
+fn runtime_import_fn(symbols: &BTreeSet<String>, runtime_import: &str) -> String {
     let symbols = symbols.iter().cloned().collect::<Vec<_>>().join(", ");
     format!("import {{ {symbols} }} from \"{runtime_import}\";")
 }

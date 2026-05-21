@@ -23,7 +23,7 @@ jobs:
           components: rustfmt
 
       - name: Check Rust formatting
-        run: cargo fmt --check
+        run: cargo fmt --check --workspace
 
   lint:
     name: Lint
@@ -39,7 +39,7 @@ jobs:
           components: clippy
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: Build
@@ -59,7 +59,7 @@ jobs:
         run: bun install
 
       - name: Build Rust compiler
-        run: cargo build --locked
+        run: cargo build --workspace --locked
 
       - name: Build JavaScript packages
         run: bun run build
@@ -82,7 +82,7 @@ jobs:
         run: bun install
 
       - name: Run Rust tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Run Bun tests
         run: bun test

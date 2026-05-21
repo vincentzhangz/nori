@@ -1,20 +1,17 @@
-#![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
-
-pub mod analyzer;
-pub mod ast;
-pub mod codegen;
-pub mod diagnostic;
-pub mod lexer;
-pub mod parser;
-
 use std::{fs, path::Path};
 
-use analyzer::Analysis;
-use ast::Program;
-use codegen::generate;
-use diagnostic::NoriError;
-use lexer::lex;
-use parser::Parser;
+pub use nori_analyzer::Analysis;
+pub use nori_ast::Program;
+pub use nori_codegen::generate;
+pub use nori_diagnostic::NoriError;
+pub use nori_lexer::lex;
+pub use nori_parser::{Parser, Syntax};
+pub mod lexer {
+    pub use nori_lexer::lex;
+}
+pub mod parser {
+    pub use nori_parser::{Parser, Syntax};
+}
 
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
@@ -48,7 +45,7 @@ pub fn parse_source(source: &str, filename: impl Into<String>) -> Result<Program
 
 pub fn analyze_source(source: &str, filename: impl Into<String>) -> Result<Analysis, NoriError> {
     let program = parse_source(source, filename)?;
-    Ok(Analysis::from_program(&program))
+    Ok(Analysis::from_program(source, &program))
 }
 
 pub fn compile_source(
@@ -60,8 +57,8 @@ pub fn compile_source(
     }
 
     let program = parse_source(source, options.filename.clone())?;
-    let analysis = Analysis::from_program(&program);
-    let code = generate(source, &program, &analysis, &options);
+    let analysis = Analysis::from_program(source, &program);
+    let code = generate(source, &program, &analysis, &options.runtime_import);
 
     Ok(CompileOutput {
         code,

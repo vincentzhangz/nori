@@ -1,17 +1,15 @@
-use crate::{
-    ast::{
-        BlockStmt, Expr, ExprKind, FunctionDecl, IfStmt, MarkupAttribute, MarkupChild,
-        MarkupElement, MarkupNode, Param, Program, RawStmt, Stmt, VarDecl, VarDeclarator, VarKind,
-    },
-    diagnostic::{NoriError, span as source_span},
-    lexer::{Keyword, Span, Token, TokenKind},
-};
-
 mod cursor;
 mod syntax;
 
-use cursor::TokenCursor;
 pub use syntax::Syntax;
+use cursor::TokenCursor;
+use nori_ast::{
+    BlockStmt, ClassDecl, DestructuringKind, DestructuringPattern, Expr, ExprKind, ForStmt,
+    FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param,
+    Program, RawStmt, Span, Stmt, TryStmt, VarDecl, VarDeclarator, VarKind,
+};
+use nori_diagnostic::{NoriError, span as source_span};
+use nori_lexer::{Keyword, Token, TokenKind};
 
 pub struct Parser {
     filename: String,
@@ -57,11 +55,22 @@ impl Parser {
         {
             return self.parse_type_only().map(Stmt::TypeOnly);
         }
+        if self.syntax.typescript && self.at_keyword(Keyword::Class) {
+            return self.parse_class().map(Stmt::Class);
+        }
         if self.at_keyword(Keyword::Export) {
             return self.parse_export();
         }
+        if self.at(TokenKind::At) {
+            return self.parse_decorated().map(Stmt::Function);
+        }
         if self.at_keyword(Keyword::Function) {
             return self.parse_function().map(Stmt::Function);
+        }
+        if self.at_keyword(Keyword::Async)
+            && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Function))
+        {
+            return self.parse_async_function();
         }
         if self.at_any_keyword(&[Keyword::Const, Keyword::Let, Keyword::Var]) {
             return self.parse_var().map(Stmt::Var);
@@ -71,6 +80,12 @@ impl Parser {
         }
         if self.at_keyword(Keyword::If) {
             return self.parse_if();
+        }
+        if self.at_keyword(Keyword::Try) {
+            return self.parse_try();
+        }
+        if self.at_keyword(Keyword::For) {
+            return self.parse_for();
         }
         if self.at(TokenKind::LeftBrace) {
             return self.parse_block().map(Stmt::Block);
@@ -86,9 +101,92 @@ impl Parser {
                 .parse_function_with_start(start)
                 .map(Stmt::ExportDefaultFunction);
         }
+        if self.at_keyword(Keyword::Async)
+            && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Function))
+        {
+            self.bump();
+            self.expect_keyword(Keyword::Function, "expected `function`")?;
+            let async_token = Some(start);
+            let name = if self.at(TokenKind::Ident) {
+                Some(self.bump().lexeme)
+            } else {
+                None
+            };
+            if self.at(TokenKind::Less) {
+                self.skip_balanced_angle_list()?;
+            }
+            self.expect(
+                TokenKind::LeftParen,
+                "expected `(` before function parameters",
+            )?;
+            let params = self.parse_params()?;
+            self.expect(
+                TokenKind::RightParen,
+                "expected `)` after function parameters",
+            )?;
+            if self.matches(TokenKind::Colon) {
+                self.skip_type_until(&[TokenKind::LeftBrace]);
+            }
+            let body = self.parse_block()?;
+            let span = Span {
+                start: start.start,
+                end: body.span.end,
+                line: start.line,
+                column: start.column,
+            };
+            return Ok(Stmt::ExportDefaultFunction(FunctionDecl {
+                name,
+                params,
+                body,
+                async_token,
+                decorators: Vec::new(),
+                span,
+            }));
+        }
         let expr = self.parse_expression_until_statement_end()?;
         self.consume_optional_semicolon();
         Ok(Stmt::ExportDefaultExpr(expr))
+    }
+
+    fn parse_class(&mut self) -> Result<ClassDecl, NoriError> {
+        let start = self.bump().span;
+        self.expect(TokenKind::Ident, "expected class name")?;
+        let name = self.previous().lexeme.clone();
+
+        let extends = if self.at_keyword(Keyword::Extends) {
+            self.bump();
+            self.expect(TokenKind::Ident, "expected parent class name")?;
+            Some(self.previous().lexeme.clone())
+        } else {
+            None
+        };
+
+        let body = self.parse_block()?;
+        let span = Span {
+            start: start.start,
+            end: body.span.end,
+            line: start.line,
+            column: start.column,
+        };
+
+        Ok(ClassDecl {
+            name,
+            extends,
+            body: body.body,
+            span,
+        })
+    }
+
+    fn parse_decorated(&mut self) -> Result<FunctionDecl, NoriError> {
+        let mut decorators = Vec::new();
+        while self.matches(TokenKind::At) {
+            decorators.push(self.previous().span);
+            self.expect(TokenKind::Ident, "expected decorator name")?;
+        }
+        let func_start = self.peek().span;
+        let mut func = self.parse_function_with_start(func_start)?;
+        func.decorators = decorators;
+        Ok(func)
     }
 
     fn parse_function(&mut self) -> Result<FunctionDecl, NoriError> {
@@ -96,7 +194,143 @@ impl Parser {
         self.parse_function_with_start(start)
     }
 
+    fn parse_async_function(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        let async_token = Some(start);
+        self.expect_keyword(Keyword::Function, "expected `function`")?;
+        let name = if self.at(TokenKind::Ident) {
+            Some(self.bump().lexeme)
+        } else {
+            None
+        };
+        if self.at(TokenKind::Less) {
+            self.skip_balanced_angle_list()?;
+        }
+        self.expect(
+            TokenKind::LeftParen,
+            "expected `(` before function parameters",
+        )?;
+        let params = self.parse_params()?;
+        self.expect(
+            TokenKind::RightParen,
+            "expected `)` after function parameters",
+        )?;
+        if self.matches(TokenKind::Colon) {
+            self.skip_type_until(&[TokenKind::LeftBrace]);
+        }
+        let body = self.parse_block()?;
+        let span = Span {
+            start: start.start,
+            end: body.span.end,
+            line: start.line,
+            column: start.column,
+        };
+        Ok(Stmt::Function(FunctionDecl {
+            name,
+            params,
+            body,
+            async_token,
+            decorators: Vec::new(),
+            span,
+        }))
+    }
+
+    fn parse_try(&mut self) -> Result<Stmt, NoriError> {
+        let try_start = self.bump().span;
+        let body = self.parse_block()?;
+        let mut catch_param = None;
+        let mut catch_body = BlockStmt {
+            body: Vec::new(),
+            span: try_start,
+        };
+        if self.at_keyword(Keyword::Catch) {
+            self.bump();
+            if self.at(TokenKind::LeftParen) {
+                self.bump();
+                if self.at(TokenKind::Ident) {
+                    catch_param = Some(self.bump().lexeme);
+                }
+                self.expect(TokenKind::RightParen, "expected `)` after catch param")?;
+            }
+            catch_body = self.parse_block()?;
+        }
+        let finally_body = if self.at_keyword(Keyword::Finally) {
+            self.bump();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(Stmt::Try(TryStmt {
+            body,
+            catch_param,
+            catch_body,
+            finally_body,
+            span: Span {
+                start: try_start.start,
+                end: self.previous().span.end,
+                line: try_start.line,
+                column: try_start.column,
+            },
+        }))
+    }
+
+    fn parse_for(&mut self) -> Result<Stmt, NoriError> {
+        let for_start = self.bump().span;
+        self.expect(TokenKind::LeftParen, "expected `(` after `for`")?;
+
+        let var_kind = if self.at_keyword(Keyword::Const) {
+            self.bump();
+            VarKind::Const
+        } else if self.at_keyword(Keyword::Let) {
+            self.bump();
+            VarKind::Let
+        } else if self.at_keyword(Keyword::Var) {
+            self.bump();
+            VarKind::Var
+        } else {
+            return Err(self.error_here("expected variable keyword in for loop"));
+        };
+
+        self.expect(TokenKind::Ident, "expected variable name in for loop")?;
+        let name = self.previous().lexeme.clone();
+
+        let is_of = if self.at_keyword(Keyword::Of) {
+            self.bump();
+            true
+        } else if self.at_keyword(Keyword::In) {
+            self.bump();
+            false
+        } else {
+            return Err(self.error_here("expected `in` or `of` in for loop"));
+        };
+        let iterable = self.parse_expression_until_statement_end()?;
+
+        self.expect(TokenKind::RightParen, "expected `)` after for loop")?;
+        let body = self.parse_block()?;
+        let body_span = body.span;
+
+        Ok(Stmt::For(ForStmt {
+            variable: var_kind,
+            name,
+            iterable,
+            is_of,
+            body,
+            span: Span {
+                start: for_start.start,
+                end: body_span.end,
+                line: for_start.line,
+                column: for_start.column,
+            },
+        }))
+    }
+
     fn parse_function_with_start(&mut self, start: Span) -> Result<FunctionDecl, NoriError> {
+        let async_token = if self.at_keyword(Keyword::Async) {
+            let tok = self.bump();
+            Some(tok.span)
+        } else {
+            None
+        };
         self.expect_keyword(Keyword::Function, "expected `function`")?;
         let name = if self.at(TokenKind::Ident) {
             Some(self.bump().lexeme)
@@ -129,6 +363,8 @@ impl Parser {
             name,
             params,
             body,
+            async_token,
+            decorators: Vec::new(),
             span,
         })
     }
@@ -136,9 +372,7 @@ impl Parser {
     fn parse_params(&mut self) -> Result<Vec<Param>, NoriError> {
         let mut params = Vec::new();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
-            if self.matches(TokenKind::Ellipsis) {
-                // Rest parameter marker is stripped from the name for now.
-            }
+            self.matches(TokenKind::Ellipsis);
             let name = if self.at(TokenKind::Ident) {
                 self.bump().lexeme
             } else {
@@ -185,8 +419,18 @@ impl Parser {
         };
         let mut declarators = Vec::new();
         loop {
-            let name_token = self.expect(TokenKind::Ident, "expected variable name")?;
-            let name = name_token.lexeme;
+            let start = self.peek().span;
+            let (name, pattern) =
+                if self.at(TokenKind::LeftBracket) || self.at(TokenKind::LeftBrace) {
+                    let pattern = self.parse_destructuring_pattern()?;
+                    (String::new(), Some(pattern))
+                } else {
+                    let name_token = self.expect(TokenKind::Ident, "expected variable name")?;
+                    (name_token.lexeme, None)
+                };
+            if name.is_empty() && self.peek().kind != TokenKind::Eq {
+                return Err(self.error_here("expected variable name or pattern"));
+            }
             if self.matches(TokenKind::Colon) {
                 self.skip_type_until(&[TokenKind::Eq, TokenKind::Comma, TokenKind::Semicolon]);
             }
@@ -195,11 +439,12 @@ impl Parser {
             } else {
                 None
             };
-            let end = init.as_ref().map_or(name_token.span, |expr| expr.span);
+            let end = init.as_ref().map_or(start, |expr| expr.span);
             declarators.push(VarDeclarator {
                 name,
+                pattern,
                 init,
-                span: join_span(name_token.span, end),
+                span: join_span(start, end),
             });
             if !self.matches(TokenKind::Comma) {
                 break;
@@ -217,6 +462,55 @@ impl Parser {
             declarators,
             span: join_span(kind_token.span, end),
         })
+    }
+
+    fn parse_destructuring_pattern(&mut self) -> Result<DestructuringPattern, NoriError> {
+        let start = self.peek().span;
+        if self.at(TokenKind::LeftBracket) {
+            self.bump();
+            let mut names = Vec::new();
+            while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
+                if self.at(TokenKind::Ident) {
+                    names.push(self.bump().lexeme);
+                } else if self.at(TokenKind::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RightBracket, "expected `]` after array pattern")?;
+            let end = self.previous().span;
+            Ok(DestructuringPattern {
+                kind: DestructuringKind::Array(names, join_span(start, end)),
+                span: join_span(start, end),
+            })
+        } else if self.at(TokenKind::LeftBrace) {
+            self.bump();
+            let mut props = Vec::new();
+            while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+                if self.at(TokenKind::Ident) {
+                    let name = self.bump().lexeme;
+                    let default = if self.matches(TokenKind::Eq) {
+                        Some(self.bump().lexeme)
+                    } else {
+                        None
+                    };
+                    props.push((name, default));
+                } else if self.at(TokenKind::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RightBrace, "expected `}` after object pattern")?;
+            let end = self.previous().span;
+            Ok(DestructuringPattern {
+                kind: DestructuringKind::Object(props, join_span(start, end)),
+                span: join_span(start, end),
+            })
+        } else {
+            Err(self.error_here("expected `[` or `{` for destructuring pattern"))
+        }
     }
 
     fn parse_return(&mut self) -> Result<Stmt, NoriError> {
@@ -461,6 +755,14 @@ impl Parser {
             TokenKind::LeftBracket => self.parse_array(token.span, stop)?,
             TokenKind::LeftBrace => self.parse_object_raw(token.span)?,
             TokenKind::Less if self.syntax.markup => self.parse_markup_after_less(token.span)?,
+            TokenKind::Keyword(Keyword::Await) => {
+                let rhs = self.parse_expression_until_bp(stop, 15)?;
+                let span = join_span(token.span, rhs.span);
+                Expr {
+                    kind: ExprKind::Await(Box::new(rhs)),
+                    span,
+                }
+            }
             _ => {
                 let expr = self.parse_raw_expression_from(token.span, stop);
                 return Ok(expr);
@@ -483,6 +785,19 @@ impl Parser {
                     kind: ExprKind::Member {
                         object: Box::new(expr),
                         property: prop.lexeme,
+                    },
+                    span,
+                };
+                continue;
+            }
+            if self.matches(TokenKind::LeftBracket) {
+                let index = self.parse_expression_until(&[TokenKind::RightBracket])?;
+                let end = self.expect(TokenKind::RightBracket, "expected `]` after index")?.span;
+                let span = join_span(expr.span, end);
+                expr = Expr {
+                    kind: ExprKind::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
                     },
                     span,
                 };
@@ -511,7 +826,19 @@ impl Parser {
     fn parse_args(&mut self) -> Result<Vec<Expr>, NoriError> {
         let mut args = Vec::new();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
-            args.push(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?);
+            if self.matches(TokenKind::Ellipsis) {
+                let expr =
+                    self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?;
+                let span = expr.span;
+                args.push(Expr {
+                    kind: ExprKind::Spread {
+                        expr: Box::new(expr),
+                    },
+                    span,
+                });
+            } else {
+                args.push(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?);
+            }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
@@ -522,7 +849,21 @@ impl Parser {
     fn parse_array(&mut self, start: Span, _stop: &[TokenKind]) -> Result<Expr, NoriError> {
         let mut items = Vec::new();
         while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
-            items.push(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBracket])?);
+            if self.matches(TokenKind::Ellipsis) {
+                let expr =
+                    self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBracket])?;
+                let span = expr.span;
+                items.push(Expr {
+                    kind: ExprKind::Spread {
+                        expr: Box::new(expr),
+                    },
+                    span,
+                });
+            } else {
+                items.push(
+                    self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBracket])?,
+                );
+            }
             if !self.matches(TokenKind::Comma) {
                 break;
             }
@@ -780,9 +1121,7 @@ impl Parser {
     fn collect_arrow_params(&mut self) -> Result<Vec<String>, NoriError> {
         let mut params = Vec::new();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
-            if self.matches(TokenKind::Ellipsis) {
-                // Rest marker is not represented in the current AST.
-            }
+            self.matches(TokenKind::Ellipsis);
             let name = self
                 .expect(TokenKind::Ident, "expected arrow parameter")?
                 .lexeme;
@@ -816,6 +1155,8 @@ impl Parser {
                 TokenKind::RightBrace => brace = brace.saturating_sub(1),
                 TokenKind::Less => angle += 1,
                 TokenKind::Greater => angle = angle.saturating_sub(1),
+                TokenKind::Pipe => {} // union types
+                TokenKind::Ampersand => {} // intersection types
                 _ => {}
             }
             self.bump();
@@ -959,6 +1300,9 @@ fn stmt_span(stmt: &Stmt) -> Span {
         Stmt::Return(_, span) => *span,
         Stmt::Block(block) => block.span,
         Stmt::If(stmt) => stmt.span,
+        Stmt::Class(class) => class.span,
+        Stmt::Try(stmt) => stmt.span,
+        Stmt::For(stmt) => stmt.span,
     }
 }
 
