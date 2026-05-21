@@ -1,9 +1,8 @@
 use nori::{
-    analyze_source, compile_source,
+    CompileOptions, analyze_source, compile_source,
     lexer::lex,
     parse_source,
     parser::{Parser, Syntax},
-    CompileOptions,
 };
 use std::path::Path;
 use std::process::Command;
@@ -163,7 +162,8 @@ fn all_examples_compile() {
         "ShadcnCard.nori",
         "DerivedEffect.nori",
     ] {
-        let source = std::fs::read_to_string(manifest_dir.join("tests/fixtures").join(fixture)).unwrap();
+        let source =
+            std::fs::read_to_string(manifest_dir.join("tests/fixtures").join(fixture)).unwrap();
         let output = compile_source(
             &source,
             CompileOptions {
@@ -212,7 +212,10 @@ export default function Counter() {
 "#;
     let output = compile_source(source, CompileOptions::default()).unwrap();
 
-    assert!(output.code.contains("signal") && output.code.contains("computed"), "Should inject both signal and computed imports");
+    assert!(
+        output.code.contains("signal") && output.code.contains("computed"),
+        "Should inject both signal and computed imports"
+    );
     assert!(
         output
             .code

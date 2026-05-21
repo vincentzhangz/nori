@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Parser as ClapParser, Subcommand};
 use miette::{IntoDiagnostic, Result};
-use nori::{analyze_source, parse_source, CompileOptions};
+use nori::{CompileOptions, analyze_source, parse_source};
 use nori_lexer::lex;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 

@@ -21,8 +21,7 @@ pub fn generate(
     let mut out = String::new();
     let mut emitted_runtime = false;
 
-    if !analysis.runtime_symbols.is_empty() && !has_runtime_import(source, runtime_import_path)
-    {
+    if !analysis.runtime_symbols.is_empty() && !has_runtime_import(source, runtime_import_path) {
         out.push_str(&runtime_import_fn(
             &analysis.runtime_symbols,
             runtime_import_path,

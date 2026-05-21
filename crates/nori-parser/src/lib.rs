@@ -1,15 +1,15 @@
 mod cursor;
 mod syntax;
 
-pub use syntax::Syntax;
 use cursor::TokenCursor;
 use nori_ast::{
     BlockStmt, ClassDecl, DestructuringKind, DestructuringPattern, Expr, ExprKind, ForStmt,
-    FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param,
-    Program, RawStmt, Span, Stmt, TryStmt, VarDecl, VarDeclarator, VarKind,
+    FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param, Program,
+    RawStmt, Span, Stmt, TryStmt, VarDecl, VarDeclarator, VarKind,
 };
 use nori_diagnostic::{NoriError, span as source_span};
 use nori_lexer::{Keyword, Token, TokenKind};
+pub use syntax::Syntax;
 
 pub struct Parser {
     filename: String,
@@ -792,7 +792,9 @@ impl Parser {
             }
             if self.matches(TokenKind::LeftBracket) {
                 let index = self.parse_expression_until(&[TokenKind::RightBracket])?;
-                let end = self.expect(TokenKind::RightBracket, "expected `]` after index")?.span;
+                let end = self
+                    .expect(TokenKind::RightBracket, "expected `]` after index")?
+                    .span;
                 let span = join_span(expr.span, end);
                 expr = Expr {
                     kind: ExprKind::Index {
@@ -1155,7 +1157,7 @@ impl Parser {
                 TokenKind::RightBrace => brace = brace.saturating_sub(1),
                 TokenKind::Less => angle += 1,
                 TokenKind::Greater => angle = angle.saturating_sub(1),
-                TokenKind::Pipe => {} // union types
+                TokenKind::Pipe => {}      // union types
                 TokenKind::Ampersand => {} // intersection types
                 _ => {}
             }

@@ -1,5 +1,5 @@
-use nori_diagnostic::{NoriError, span as source_span};
 use nori_ast::Span;
+use nori_diagnostic::{NoriError, span as source_span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
