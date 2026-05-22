@@ -1,4 +1,8 @@
-import { runNoriStdin } from "../../cli/src/index.js";
+import { fileURLToPath } from "node:url";
+
+export { default as loader } from "./loader.js";
+
+const loaderPath = fileURLToPath(new URL("./loader.js", import.meta.url));
 
 export class NoriRspackPlugin {
   constructor(options = {}) {
@@ -6,33 +10,37 @@ export class NoriRspackPlugin {
   }
 
   apply(compiler) {
-    const pluginName = "NoriRspackPlugin";
     const runtimeImport = this.options.runtimeImport ?? "@nori/core";
     const include = this.options.include ?? /\.nori$/;
 
+    compiler.options.module ??= {};
+    compiler.options.module.rules ??= [];
     compiler.options.module.rules.push({
       test: include,
-      use: {
-        loader: require.resolve("./loader.js"),
-        options: { runtimeImport }
-      }
+      type: "javascript/auto",
+      use: [
+        {
+          loader: "builtin:swc-loader",
+          options: {
+            jsc: {
+              parser: {
+                syntax: "ecmascript",
+                jsx: true
+              },
+              transform: {
+                react: {
+                  runtime: "classic"
+                }
+              }
+            }
+          }
+        },
+        {
+          loader: loaderPath,
+          options: { runtimeImport }
+        }
+      ]
     });
-  }
-}
-
-export function loader(source) {
-  const options = this.getOptions() || {};
-  const runtimeImport = options.runtimeImport ?? "@nori/core";
-
-  try {
-    const result = runNoriStdin(source, [
-      "--runtime-import",
-      runtimeImport,
-      this.resourcePath || "input.nori"
-    ]);
-    return result;
-  } catch (error) {
-    throw new Error(`Nori loader failed: ${error.message}`);
   }
 }
 

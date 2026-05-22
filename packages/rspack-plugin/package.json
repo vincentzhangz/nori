@@ -10,7 +10,8 @@
     "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "node --check src/index.js",
-    "typecheck": "node --check src/index.js"
+    "build": "node --check src/index.js && node --check src/loader.js",
+    "typecheck": "node --check src/index.js && node --check src/loader.js",
+    "test": "bun test src/index.test.js"
   }
 }
