@@ -44,6 +44,7 @@ The analyzer walks the AST and records:
 - Signal variables created by `$state`.
 - Computed variables created by `$derived`.
 - Effects created by `$effect`.
+- Scope-aware `.value` reads and writes for reactive bindings.
 - Runtime symbols needed in output.
 
 This is where future semantic checks should live.

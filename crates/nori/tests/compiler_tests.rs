@@ -99,6 +99,42 @@ fn analyzer_discovers_reactive_bindings() {
 }
 
 #[test]
+fn analyzer_tracks_reactive_value_reads_and_writes() {
+    let source = r#"
+const count = $state(0);
+const doubled = $derived(count.value * 2);
+count.value += 1;
+
+export default function Counter() {
+  return <p>{count.value} / {doubled.value}</p>;
+}
+"#;
+    let analysis = analyze_source(source, "inline.nori").unwrap();
+
+    assert!(analysis.value_reads.contains("count"));
+    assert!(analysis.value_reads.contains("doubled"));
+    assert!(analysis.value_writes.contains("count"));
+    assert!(!analysis.value_writes.contains("doubled"));
+}
+
+#[test]
+fn analyzer_ignores_value_accesses_on_shadowed_reactive_bindings() {
+    let source = r#"
+const count = $state(0);
+
+function read(count) {
+  count.value += 1;
+  return count.value;
+}
+"#;
+    let analysis = analyze_source(source, "inline.nori").unwrap();
+
+    assert!(analysis.signals.contains("count"));
+    assert!(!analysis.value_reads.contains("count"));
+    assert!(!analysis.value_writes.contains("count"));
+}
+
+#[test]
 fn codegen_transforms_primitives_and_strips_types() {
     let source = r"
 type Count = number;
