@@ -17,7 +17,6 @@ pub mod parser {
 pub struct CompileOptions {
     pub filename: String,
     pub runtime_import: String,
-    pub source_map: bool,
 }
 
 impl Default for CompileOptions {
@@ -25,7 +24,6 @@ impl Default for CompileOptions {
         Self {
             filename: "<anonymous>.nori".to_string(),
             runtime_import: "@nori/core".to_string(),
-            source_map: false,
         }
     }
 }
@@ -33,7 +31,6 @@ impl Default for CompileOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOutput {
     pub code: String,
-    pub map: Option<String>,
     pub diagnostics: Vec<String>,
 }
 
@@ -62,7 +59,6 @@ pub fn compile_source(
 
     Ok(CompileOutput {
         code,
-        map: options.source_map.then(|| "{}".to_string()),
         diagnostics: analysis.diagnostics,
     })
 }

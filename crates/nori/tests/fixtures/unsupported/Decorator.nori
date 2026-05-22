@@ -1,0 +1,8 @@
+class Controller {
+  @decorator()
+  method() {}
+}
+
+export default function App() {
+  return <p>Hello</p>;
+}

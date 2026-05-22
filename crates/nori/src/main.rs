@@ -89,7 +89,6 @@ fn compile_command(
                 input.display().to_string()
             },
             runtime_import: runtime_import.to_string(),
-            source_map: false,
         },
     )?;
 

@@ -62,7 +62,10 @@ impl Parser {
             return self.parse_export();
         }
         if self.at(TokenKind::At) {
-            return self.parse_decorated().map(Stmt::Function);
+            return Err(self.error_here("decorators are not supported"));
+        }
+        if self.at_keyword(Keyword::Yield) {
+            return Err(self.error_here("`yield` is not supported"));
         }
         if self.at_keyword(Keyword::Function) {
             return self.parse_function().map(Stmt::Function);
@@ -175,18 +178,6 @@ impl Parser {
             body: body.body,
             span,
         })
-    }
-
-    fn parse_decorated(&mut self) -> Result<FunctionDecl, NoriError> {
-        let mut decorators = Vec::new();
-        while self.matches(TokenKind::At) {
-            decorators.push(self.previous().span);
-            self.expect(TokenKind::Ident, "expected decorator name")?;
-        }
-        let func_start = self.peek().span;
-        let mut func = self.parse_function_with_start(func_start)?;
-        func.decorators = decorators;
-        Ok(func)
     }
 
     fn parse_function(&mut self) -> Result<FunctionDecl, NoriError> {

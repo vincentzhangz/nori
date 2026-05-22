@@ -59,6 +59,8 @@ Nori does not aim to parse all JavaScript yet. Known future areas include:
 - Classes.
 - Full type grammar.
 - Complex destructuring patterns.
+- Decorators.
+- `yield`.
 - Namespaced element names.
 - Source maps.
 - Full error recovery.

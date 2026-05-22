@@ -4,8 +4,32 @@ use nori::{
     parse_source,
     parser::{Parser, Syntax},
 };
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("nori-{name}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 #[test]
 fn lexer_tracks_markup_text_and_spans() {
@@ -190,6 +214,60 @@ fn cli_help_and_lex_work() {
 }
 
 #[test]
+fn cli_compile_writes_explicit_output_file() {
+    let output_dir = TempDir::new("explicit-output");
+    let output_path = output_dir.path.join("Counter.compiled.js");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Counter.nori");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nori"))
+        .args(["compile", fixture.to_str().unwrap(), "-o"])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "compile command failed: {:?}",
+        output.stderr
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        output_path.display().to_string()
+    );
+
+    let code = fs::read_to_string(output_path).unwrap();
+    assert!(code.contains("const count = signal(0);"));
+    assert!(code.contains("export default function Counter()"));
+}
+
+#[test]
+fn cli_compile_writes_named_file_to_output_directory() {
+    let output_dir = TempDir::new("directory-output");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Counter.nori");
+    let output_path = output_dir.path.join("Counter.js");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nori"))
+        .args(["compile", fixture.to_str().unwrap(), "-o"])
+        .arg(&output_dir.path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "compile command failed: {:?}",
+        output.stderr
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        output_path.display().to_string()
+    );
+
+    let code = fs::read_to_string(output_path).unwrap();
+    assert!(code.contains("from \"@nori/core\";"));
+    assert!(code.contains("type=\"button\""));
+}
+
+#[test]
 fn all_examples_compile() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     for fixture in [
@@ -363,39 +441,37 @@ export default function Counter() {
 
 #[test]
 fn unsupported_decorator_produces_diagnostic() {
-    let source = r#"
-class Controller {
-  @decorator()
-  method() {}
-}
-export default function App() {
-  return <p>Hello</p>;
-}
-"#;
-    let result = compile_source(source, CompileOptions::default());
+    let source = include_str!("fixtures/unsupported/Decorator.nori");
+    let error = compile_source(
+        source,
+        CompileOptions {
+            filename: "Decorator.nori".to_string(),
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_err();
 
     assert!(
-        result.is_err(),
-        "decorator should produce an error since it's not yet supported"
+        error.to_string().contains("decorators are not supported"),
+        "{error}"
     );
 }
 
 #[test]
 fn unsupported_yield_produces_diagnostic() {
-    let source = r#"
-function* gen() {
-  yield 1;
-  yield 2;
-}
-export default function App() {
-  return <p>Hello</p>;
-}
-"#;
-    let result = compile_source(source, CompileOptions::default());
+    let source = include_str!("fixtures/unsupported/Yield.nori");
+    let error = compile_source(
+        source,
+        CompileOptions {
+            filename: "Yield.nori".to_string(),
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_err();
 
     assert!(
-        result.is_err(),
-        "yield should produce an error since it's not yet supported"
+        error.to_string().contains("`yield` is not supported"),
+        "{error}"
     );
 }
 
