@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { build } from "vite";
+
+import nori from "./index.js";
 
 function runNoriStdinTest(code, args = []) {
   const repoRoot = resolve(here, "../..");
@@ -56,5 +59,30 @@ export default function Counter(): JSX.Element {
     expect(result).not.toContain("type Count");
     expect(result).not.toContain(": number");
     expect(result).not.toContain(": JSX.Element");
+  });
+
+  it("should build the example app through Vite", async () => {
+    const exampleRoot = resolve(here, "../examples/counter-app");
+    const result = await build({
+      root: exampleRoot,
+      configFile: false,
+      logLevel: "silent",
+      plugins: [nori()],
+      resolve: {
+        alias: {
+          "@nori/core": resolve(here, "../../core/src/index.ts")
+        }
+      },
+      build: {
+        minify: false,
+        write: false
+      }
+    });
+    const chunks = (Array.isArray(result) ? result : [result]).flatMap((output) => output.output);
+    const app = chunks.find((chunk) => chunk.type === "chunk" && chunk.isEntry);
+
+    expect(app?.code).toContain("signal(0)");
+    expect(app?.code).toContain("computed");
+    expect(app?.code).toContain("Counter");
   });
 });

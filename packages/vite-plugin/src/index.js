@@ -1,4 +1,5 @@
 import { runNoriStdin } from "../../cli/src/index.js";
+import { transformWithOxc } from "vite";
 
 export default function nori(options = {}) {
   const include = options.include ?? /\.nori$/;
@@ -7,7 +8,7 @@ export default function nori(options = {}) {
   return {
     name: "nori",
     enforce: "pre",
-    transform(code, id) {
+    async transform(code, id) {
       if (!include.test(id)) {
         return null;
       }
@@ -15,9 +16,12 @@ export default function nori(options = {}) {
       const compiled = runNoriStdin(code, [
         "--runtime-import",
         runtimeImport,
-        "dummy.nori"
+        id
       ]);
-      return { code: compiled, map: null };
+      return transformWithOxc(compiled, id, {
+        lang: "jsx",
+        jsx: { runtime: "classic" }
+      });
     }
   };
 }

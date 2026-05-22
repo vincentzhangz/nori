@@ -13,5 +13,11 @@
     "build": "node --check src/index.js",
     "typecheck": "node --check src/index.js",
     "test": "bun test src/index.test.js"
+  },
+  "peerDependencies": {
+    "vite": "^8.0.14"
+  },
+  "devDependencies": {
+    "vite": "^8.0.14"
   }
 }

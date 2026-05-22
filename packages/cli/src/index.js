@@ -25,7 +25,7 @@ export function runNori(args, options = {}) {
 
 export function runNoriStdin(code, args = [], options = {}) {
 	const command = resolveBinary();
-	const fullArgs = ["compile", "--stdin", ...args];
+	const fullArgs = [...command.args, "compile", "--stdin", ...args];
 	const result = spawnSync(command.bin, fullArgs, {
 		cwd: command.cwd,
 		encoding: "utf8",

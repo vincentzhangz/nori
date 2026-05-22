@@ -1,0 +1,11 @@
+const count = $state(0);
+const doubled = $derived(count.value * 2);
+
+export default function Counter() {
+  return (
+    <section>
+      <p>{count.value}</p>
+      <p>{doubled.value}</p>
+    </section>
+  );
+}
