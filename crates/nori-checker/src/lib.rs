@@ -283,10 +283,7 @@ impl<'a> Checker<'a> {
                 return Some(*ty);
             }
         }
-        self.symbol_types
-            .get(id.0 as usize)
-            .copied()
-            .flatten()
+        self.symbol_types.get(id.0 as usize).copied().flatten()
     }
 
     fn resolve_ident_symbol(&self, name: &str) -> Option<SymbolId> {
@@ -620,9 +617,7 @@ impl<'a> Checker<'a> {
                         readonly: false,
                     });
                 }
-                return self.arena.intern(Type::ObjectShape {
-                    props: shape_props,
-                });
+                return self.arena.intern(Type::ObjectShape { props: shape_props });
             }
             ExprKind::Ident(name) => {
                 if let Some(symbol_id) = self.resolve_ident_symbol(name.as_str()) {
@@ -955,7 +950,8 @@ impl<'a> Checker<'a> {
         let members = self.flatten_union(current);
         let mut kept = Vec::new();
         for m in members {
-            if typeof_matches(self.arena.get(m), tag) || matches_primitive(self.arena.get(m), target)
+            if typeof_matches(self.arena.get(m), tag)
+                || matches_primitive(self.arena.get(m), target)
             {
                 kept.push(m);
             }
@@ -1070,10 +1066,7 @@ impl<'a> Checker<'a> {
                                     type_display(self.arena.get(prop.ty)),
                                 ),
                                 severity: Severity::Error,
-                                span: nori_diagnostic::span(
-                                    span.start as usize,
-                                    span.end as usize,
-                                ),
+                                span: nori_diagnostic::span(span.start as usize, span.end as usize),
                                 code: "nori::check",
                             });
                         }
@@ -1084,9 +1077,7 @@ impl<'a> Checker<'a> {
 
         for attr in &el.attributes {
             match attr {
-                MarkupAttribute::Named {
-                    value: Some(v), ..
-                }
+                MarkupAttribute::Named { value: Some(v), .. }
                 | MarkupAttribute::Spread { expr: v, .. } => {
                     let _ = self.infer_expr_type(v);
                 }
@@ -1251,20 +1242,12 @@ fn match_typeof_equality(expr: &Expr<'_>) -> Option<(String, String, bool)> {
     match (&left.kind, &right.kind) {
         (ExprKind::Typeof(inner), ExprKind::String(lit)) => {
             if let ExprKind::Ident(name) = &inner.kind {
-                return Some((
-                    name.as_str().to_string(),
-                    unquote(lit.as_str()),
-                    positive,
-                ));
+                return Some((name.as_str().to_string(), unquote(lit.as_str()), positive));
             }
         }
         (ExprKind::String(lit), ExprKind::Typeof(inner)) => {
             if let ExprKind::Ident(name) = &inner.kind {
-                return Some((
-                    name.as_str().to_string(),
-                    unquote(lit.as_str()),
-                    positive,
-                ));
+                return Some((name.as_str().to_string(), unquote(lit.as_str()), positive));
             }
         }
         _ => {}
@@ -1604,10 +1587,7 @@ const bad: Keys = "c";
     #[test]
     fn check_files_aggregates_diagnostics_across_files() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "nori-checker-m7-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nori-checker-m7-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.ts");
@@ -1676,14 +1656,11 @@ const el = <Foo bar={1} />;
 "#,
         );
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| {
-                    d.message.contains("bar")
-                        || d.message.contains("not assignable")
-                        || d.message.contains("prop")
-                }),
+            result.diagnostics.iter().any(|d| {
+                d.message.contains("bar")
+                    || d.message.contains("not assignable")
+                    || d.message.contains("prop")
+            }),
             "expected prop type error, got {:?}",
             result.diagnostics
         );

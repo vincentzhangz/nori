@@ -46,7 +46,9 @@ impl ModuleGraph {
     }
 
     pub fn get_by_path(&self, path: &Path) -> Option<&Module> {
-        self.path_to_id.get(path).and_then(|id| self.modules.get(id))
+        self.path_to_id
+            .get(path)
+            .and_then(|id| self.modules.get(id))
     }
 
     /// Topological order from entry (dependencies before dependents). Cycles are
@@ -403,7 +405,10 @@ fn emit_bundle(graph: &ModuleGraph, order: &[ModuleId], mode: EmitMode) -> Strin
                 let Some(module) = graph.get(*id) else {
                     continue;
                 };
-                code.push_str(&format!("// ----- module: {} -----\n", module.path.display()));
+                code.push_str(&format!(
+                    "// ----- module: {} -----\n",
+                    module.path.display()
+                ));
                 code.push_str(module.source.trim_end());
                 code.push_str("\n\n");
             }
@@ -414,10 +419,7 @@ fn emit_bundle(graph: &ModuleGraph, order: &[ModuleId], mode: EmitMode) -> Strin
                 let Some(module) = graph.get(*id) else {
                     continue;
                 };
-                code.push_str(&format!(
-                    "// ===== FILE: {} =====\n",
-                    module.path.display()
-                ));
+                code.push_str(&format!("// ===== FILE: {} =====\n", module.path.display()));
                 code.push_str(module.source.trim_end());
                 code.push_str("\n// ===== END FILE =====\n\n");
             }
@@ -464,7 +466,10 @@ fn collect_imports_parsed(source: &str, path: &Path) -> Result<Vec<String>, Bund
 fn export_source(export: &nori_ast::ExportDecl<'_>) -> Option<String> {
     use nori_ast::ExportDecl;
     match export {
-        ExportDecl::Named { source: Some(source), .. } => Some(strip_quotes(source.as_str())),
+        ExportDecl::Named {
+            source: Some(source),
+            ..
+        } => Some(strip_quotes(source.as_str())),
         ExportDecl::All { source, .. } => Some(strip_quotes(source.as_str())),
         _ => None,
     }
@@ -480,9 +485,9 @@ fn strip_quotes(value: &str) -> String {
 fn collect_imports_regex(source: &str) -> Vec<String> {
     let mut imports = Vec::new();
     // import ... from "x"  |  import "x"  |  export ... from "x"
-    let patterns = [
-        regex_lite_from(r#"(?:import|export)\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]"#),
-    ];
+    let patterns = [regex_lite_from(
+        r#"(?:import|export)\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]"#,
+    )];
     for (line_idx, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("//") {
@@ -499,9 +504,7 @@ fn collect_imports_regex(source: &str) -> Vec<String> {
 }
 
 /// Tiny matcher so we avoid adding the `regex` crate; good enough for import lines.
-fn regex_lite_from(
-    _pattern: &str,
-) -> impl Fn(&str) -> Option<String> {
+fn regex_lite_from(_pattern: &str) -> impl Fn(&str) -> Option<String> {
     |line: &str| {
         let lower = line;
         let is_import = lower.starts_with("import ");

@@ -8,8 +8,9 @@ use nori_ast::{
     ClassMethod, ClassStaticBlock, ClassicForStmt, Decorator, DoWhileStmt, EnumDecl, EnumMember,
     ExportDecl, Expr, ExprKind, ForInit, ForStmt, FunctionDecl, IfStmt, InterfaceDecl,
     MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, ModuleDecl, Param, Pattern, Program,
-    RawStmt, Span, Stmt, TSFnParam, TSKeywordKind, TSLiteral, TSType, TSTypeElement, TSTypeOperator,
-    TryStmt, TypeAliasDecl, TypeErasureKind, VarDecl, VarDeclarator, VarKind, WhileStmt,
+    RawStmt, Span, Stmt, TSFnParam, TSKeywordKind, TSLiteral, TSType, TSTypeElement,
+    TSTypeOperator, TryStmt, TypeAliasDecl, TypeErasureKind, VarDecl, VarDeclarator, VarKind,
+    WhileStmt,
 };
 use nori_diagnostic::{Diagnostic, NoriError, span as source_span};
 use nori_lexer::{Keyword, Token, TokenKind};
@@ -360,7 +361,10 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                self.expect(TokenKind::RightBrace, "expected `}` after export type specifiers")?;
+                self.expect(
+                    TokenKind::RightBrace,
+                    "expected `}` after export type specifiers",
+                )?;
                 if self.matches_keyword(Keyword::From) {
                     self.expect(TokenKind::String, "expected export source")?;
                 }

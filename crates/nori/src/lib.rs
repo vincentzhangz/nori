@@ -3,11 +3,13 @@ use std::{fs, path::Path};
 pub use nori_allocator::Allocator;
 pub use nori_analyzer::Analysis;
 pub use nori_ast::Program;
+pub use nori_checker::{
+    CheckResult, GlobalTypeEnv, check, check_files, check_with_globals, lib_es5_globals,
+};
 pub use nori_codegen::generate;
 pub use nori_diagnostic::NoriError;
 pub use nori_lexer::lex;
 pub use nori_parser::{Parser, Syntax, parse_in};
-pub use nori_checker::{CheckResult, GlobalTypeEnv, check, check_files, check_with_globals, lib_es5_globals};
 pub use nori_semantic::{SemanticModel, build_semantic};
 pub mod ast {
     pub use nori_ast::*;
@@ -101,10 +103,7 @@ pub fn compile_file(path: &Path, options: CompileOptions) -> Result<CompileOutpu
     compile_source(&source, options)
 }
 
-pub fn check_source(
-    source: &str,
-    filename: impl Into<String>,
-) -> Result<CheckResult, NoriError> {
+pub fn check_source(source: &str, filename: impl Into<String>) -> Result<CheckResult, NoriError> {
     let allocator = Allocator::new();
     let program = parse_source(&allocator, source, filename)?;
     Ok(check(&program))

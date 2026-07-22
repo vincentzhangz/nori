@@ -664,7 +664,11 @@ export default function Counter() {
             .code
             .contains("const label = count.value.toString();")
     );
-    assert!(output.code.contains(r#"h("p", null, () => label, " ", () => count.value)"#));
+    assert!(
+        output
+            .code
+            .contains(r#"h("p", null, () => label, " ", () => count.value)"#)
+    );
     assert!(!output.code.contains("$state<number>"));
     assert!(!output.code.contains(" as Signal"));
     assert!(!output.code.contains(" satisfies "));
@@ -699,9 +703,7 @@ export default function Greet() {
     let output = compile_source(source, CompileOptions::default()).unwrap();
 
     assert!(
-        output
-            .code
-            .contains(r#"import { h } from "@nori/core""#),
+        output.code.contains(r#"import { h } from "@nori/core""#),
         "Should inject h when markup is present"
     );
     assert!(output.code.contains(r#"h("p", null, () => greeting)"#));
@@ -1104,7 +1106,6 @@ export default function App() {
     assert!(output.code.contains("sum(1, 2, ...rest)"));
 }
 
-
 #[test]
 fn parser_recovers_after_syntax_error() {
     let source = r#"
@@ -1115,10 +1116,7 @@ const alsoOk = 3;
     let allocator = Allocator::new();
     let tokens = lex(source).unwrap();
     let result = Parser::new(&allocator, source, "bad.nori".to_string(), tokens).parse_program();
-    assert!(
-        !result.diagnostics.is_empty(),
-        "expected parse diagnostics"
-    );
+    assert!(!result.diagnostics.is_empty(), "expected parse diagnostics");
     assert!(
         result.diagnostics.iter().any(|d| d.is_error()),
         "expected at least one error"
@@ -1319,8 +1317,5 @@ fn semantic_model_tracks_scopes_for_nested_lets() {
     let source = "let x = 1; { let x = 2; x; }";
     let program = parse_source(&allocator, source, "sem.nori").unwrap();
     let model = nori::build_semantic(&program);
-    assert_eq!(
-        model.symbols.iter().filter(|s| s.name == "x").count(),
-        2
-    );
+    assert_eq!(model.symbols.iter().filter(|s| s.name == "x").count(), 2);
 }

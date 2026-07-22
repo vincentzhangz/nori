@@ -275,9 +275,7 @@ impl SemanticBuilder {
                 self.declare(name.as_str(), kind, fallback_span);
             }
             Pattern::Rest(inner) => self.declare_pattern(inner, kind, fallback_span),
-            Pattern::Array {
-                elements, rest, ..
-            } => {
+            Pattern::Array { elements, rest, .. } => {
                 for element in elements.iter().flatten() {
                     self.declare_pattern(element, kind, fallback_span);
                 }
@@ -406,9 +404,9 @@ impl<'a> Visit<'a> for SemanticBuilder {
             Stmt::Function(function) | Stmt::ExportDefaultFunction(function) => {
                 self.visit_function_decl(function);
             }
-            Stmt::Return(Some(expr), _)
-            | Stmt::Expr(expr)
-            | Stmt::ExportDefaultExpr(expr) => self.visit_expr(expr),
+            Stmt::Return(Some(expr), _) | Stmt::Expr(expr) | Stmt::ExportDefaultExpr(expr) => {
+                self.visit_expr(expr)
+            }
             Stmt::Block(block) => self.visit_block(block),
             Stmt::If(if_stmt) => {
                 self.visit_expr(&if_stmt.condition);
@@ -671,11 +669,7 @@ mod tests {
             .expect("inner x lives in the block scope");
         assert_ne!(outer.id, inner.id);
 
-        let resolved: Vec<_> = model
-            .references
-            .iter()
-            .filter(|r| r.name == "x")
-            .collect();
+        let resolved: Vec<_> = model.references.iter().filter(|r| r.name == "x").collect();
         assert_eq!(resolved.len(), 2);
 
         // First `x;` reference is inside the block -> resolves to the inner shadow.
@@ -733,12 +727,7 @@ mod tests {
         // The binding should live in the function scope, not the inner block scope.
         let function_scope = symbols[0].scope_id;
         assert_ne!(function_scope, model.root_scope);
-        assert!(
-            model
-                .scope(function_scope)
-                .bindings
-                .contains_key("hoisted")
-        );
+        assert!(model.scope(function_scope).bindings.contains_key("hoisted"));
 
         assert_eq!(model.unresolved_references().count(), 0);
     }

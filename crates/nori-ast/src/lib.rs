@@ -983,7 +983,9 @@ fn walk_ts_type<'a, V: Visit<'a>>(visitor: &mut V, ty: &TSType<'a>) {
             }
         }
         TSType::Keyword(_, _)
-        | TSType::Reference { type_args: None, .. }
+        | TSType::Reference {
+            type_args: None, ..
+        }
         | TSType::Infer { .. }
         | TSType::Typeof { .. }
         | TSType::Literal(_)
@@ -1024,9 +1026,7 @@ fn walk_ts_type_element<'a, V: Visit<'a>>(visitor: &mut V, element: &TSTypeEleme
             }
         }
         TSTypeElement::Index {
-            key_type,
-            type_ann,
-            ..
+            key_type, type_ann, ..
         } => {
             walk_ts_type(visitor, key_type);
             walk_ts_type(visitor, type_ann);
@@ -1412,7 +1412,9 @@ fn walk_ts_type_mut<'a, V: VisitMut<'a>>(visitor: &mut V, ty: &mut TSType<'a>) {
             }
         }
         TSType::Keyword(_, _)
-        | TSType::Reference { type_args: None, .. }
+        | TSType::Reference {
+            type_args: None, ..
+        }
         | TSType::Infer { .. }
         | TSType::Typeof { .. }
         | TSType::Literal(_)
@@ -1421,10 +1423,7 @@ fn walk_ts_type_mut<'a, V: VisitMut<'a>>(visitor: &mut V, ty: &mut TSType<'a>) {
     }
 }
 
-fn walk_ts_type_element_mut<'a, V: VisitMut<'a>>(
-    visitor: &mut V,
-    element: &mut TSTypeElement<'a>,
-) {
+fn walk_ts_type_element_mut<'a, V: VisitMut<'a>>(visitor: &mut V, element: &mut TSTypeElement<'a>) {
     match element {
         TSTypeElement::Property { type_ann, .. } => {
             if let Some(type_ann) = type_ann {
@@ -1456,9 +1455,7 @@ fn walk_ts_type_element_mut<'a, V: VisitMut<'a>>(
             }
         }
         TSTypeElement::Index {
-            key_type,
-            type_ann,
-            ..
+            key_type, type_ann, ..
         } => {
             walk_ts_type_mut(visitor, key_type);
             walk_ts_type_mut(visitor, type_ann);
