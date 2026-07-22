@@ -189,12 +189,7 @@ impl Parser {
                     self.skip_type_until(&[TokenKind::LeftBrace]);
                 }
                 let body = self.parse_function_body()?;
-                let span = Span {
-                    start: start.start,
-                    end: body.span.end,
-                    line: start.line,
-                    column: start.column,
-                };
+                let span = Span::new(start.start as u32, body.span.end as u32);
                 return Ok(Stmt::ExportDefaultFunction(FunctionDecl {
                     name,
                     params,
@@ -353,12 +348,7 @@ impl Parser {
         let body_end = self
             .expect(TokenKind::RightBrace, "expected `}` after class body")?
             .span;
-        let span = Span {
-            start: start.start,
-            end: body_end.end,
-            line: start.line,
-            column: start.column,
-        };
+        let span = Span::new(start.start as u32, body_end.end as u32);
         Ok(ClassDecl {
             name,
             extends,
@@ -530,12 +520,7 @@ impl Parser {
         } else {
             None
         };
-        let span = Span {
-            start: start.start,
-            end: self.previous().span.end,
-            line: start.line,
-            column: start.column,
-        };
+        let span = Span::new(start.start as u32, self.previous().span.end as u32);
         Ok(Decorator { name, args, span })
     }
 
@@ -586,12 +571,7 @@ impl Parser {
             self.skip_type_until(&[TokenKind::LeftBrace]);
         }
         let body = self.parse_block()?;
-        let span = Span {
-            start: start.start,
-            end: body.span.end,
-            line: start.line,
-            column: start.column,
-        };
+        let span = Span::new(start.start as u32, body.span.end as u32);
         Ok(Stmt::Function(FunctionDecl {
             name,
             params,
@@ -633,12 +613,7 @@ impl Parser {
             catch_param,
             catch_body,
             finally_body,
-            span: Span {
-                start: try_start.start,
-                end: self.previous().span.end,
-                line: try_start.line,
-                column: try_start.column,
-            },
+            span: Span::new(try_start.start as u32, self.previous().span.end as u32),
         }))
     }
 
@@ -900,12 +875,7 @@ impl Parser {
             self.skip_type_until(&[TokenKind::LeftBrace]);
         }
         let body = self.parse_function_body()?;
-        let span = Span {
-            start: start.start,
-            end: body.span.end,
-            line: start.line,
-            column: start.column,
-        };
+        let span = Span::new(start.start as u32, body.span.end as u32);
         Ok(FunctionDecl {
             name,
             params,
@@ -1084,12 +1054,7 @@ impl Parser {
                         } else {
                             None
                         };
-                    let span = Span {
-                        start: start.start,
-                        end: self.previous().span.end,
-                        line: start.line,
-                        column: start.column,
-                    };
+                    let span = Span::new(start.start as u32, self.previous().span.end as u32);
                     properties.push(nori_ast::ObjectPatternProp {
                         key: name.clone(),
                         alias: None,
@@ -1146,7 +1111,7 @@ impl Parser {
             condition,
             consequent,
             alternate,
-            span: Span { end, ..start },
+            span: Span::new(start.start, end as u32),
         }))
     }
 
@@ -2322,11 +2287,11 @@ impl Parser {
         let token = self.peek();
         let message = format!(
             "{} in {} at {}:{}",
-            message, self.filename, token.span.line, token.span.column
+            message, self.filename, token.span.start, token.span.end
         );
         NoriError::Parse {
             message,
-            span: source_span(token.span.start, token.span.end),
+            span: source_span(token.span.start as usize, token.span.end as usize),
         }
     }
 }
@@ -2363,12 +2328,7 @@ fn stmt_span(stmt: &Stmt) -> Span {
 }
 
 fn join_span(start: Span, end: Span) -> Span {
-    Span {
-        start: start.start,
-        end: end.end,
-        line: start.line,
-        column: start.column,
-    }
+    Span::new(start.start as u32, end.end as u32)
 }
 
 fn assignment_op(kind: TokenKind) -> Option<&'static str> {

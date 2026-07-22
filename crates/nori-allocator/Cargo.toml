@@ -1,9 +1,9 @@
 [package]
-name = "nori-ast"
+name = "nori-allocator"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 
 [dependencies]
-nori-span = { path = "../nori-span" }
+bumpalo = { version = "3", features = ["collections", "boxed"] }

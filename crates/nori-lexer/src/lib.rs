@@ -682,21 +682,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn make_token(&self, kind: TokenKind, start: usize, end: usize) -> Token {
-        let before = &self.source[..start];
-        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let column = before
-            .rsplit_once('\n')
-            .map_or(before.len() + 1, |(_, tail)| tail.len() + 1);
-
         Token {
             kind,
             lexeme: self.source[start..end].to_string(),
-            span: Span {
-                start,
-                end,
-                line,
-                column,
-            },
+            span: Span::new(start as u32, end as u32),
         }
     }
 

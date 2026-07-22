@@ -895,7 +895,9 @@ fn emit_markup_source(source: &str, node: &MarkupNode, out: &mut String) {
 
     for (start, end, replacement) in edits {
         if span.start <= start && end <= span.end {
-            text.replace_range(start - span.start..end - span.start, &replacement);
+            let local_start = (start - span.start) as usize;
+            let local_end = (end - span.start) as usize;
+            text.replace_range(local_start..local_end, &replacement);
         }
     }
 
@@ -905,7 +907,7 @@ fn emit_markup_source(source: &str, node: &MarkupNode, out: &mut String) {
 fn collect_markup_expr_replacements(
     source: &str,
     node: &MarkupNode,
-    edits: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(u32, u32, String)>,
 ) {
     match node {
         MarkupNode::Element(element) => {
@@ -935,7 +937,7 @@ fn collect_markup_expr_replacements(
 fn collect_markup_expr_replacements_from_child(
     source: &str,
     child: &MarkupChild,
-    edits: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(u32, u32, String)>,
 ) {
     match child {
         MarkupChild::Expr(expr) => push_markup_expr_replacement(source, expr, edits),
@@ -947,14 +949,14 @@ fn collect_markup_expr_replacements_from_child(
 fn push_markup_expr_replacement(
     source: &str,
     expr: &Expr,
-    edits: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(u32, u32, String)>,
 ) {
     let mut replacement = String::new();
     emit_expr(source, expr, &mut replacement);
     edits.push((expr.span.start, expr.span.end, replacement));
 }
 
-fn collect_button_type_insertions(node: &MarkupNode, edits: &mut Vec<(usize, usize, String)>) {
+fn collect_button_type_insertions(node: &MarkupNode, edits: &mut Vec<(u32, u32, String)>) {
     match node {
         MarkupNode::Element(element) => collect_button_type_insertions_from_element(element, edits),
         MarkupNode::Fragment { children, .. } => {
@@ -967,14 +969,14 @@ fn collect_button_type_insertions(node: &MarkupNode, edits: &mut Vec<(usize, usi
 
 fn collect_button_type_insertions_from_element(
     element: &MarkupElement,
-    edits: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(u32, u32, String)>,
 ) {
     if element.name == "button"
         && !element.attributes.iter().any(|attribute| {
             matches!(attribute, MarkupAttribute::Named { name, .. } if name.eq_ignore_ascii_case("type"))
         })
     {
-        let offset = element.span.start + 1 + element.name.len();
+        let offset = element.span.start + 1 + element.name.len() as u32;
         edits.push((offset, offset, r#" type="button""#.to_string()));
     }
 
@@ -985,7 +987,7 @@ fn collect_button_type_insertions_from_element(
 
 fn collect_button_type_insertions_from_child(
     child: &MarkupChild,
-    edits: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(u32, u32, String)>,
 ) {
     if let MarkupChild::Node(node) = child {
         collect_button_type_insertions(node, edits);
@@ -1052,8 +1054,10 @@ fn runtime_import_fn(symbols: &BTreeSet<String>, runtime_import: &str) -> String
     format!("import {{ {symbols} }} from \"{runtime_import}\";")
 }
 
-fn source_slice(source: &str, start: usize, end: usize) -> &str {
-    source.get(start..end).unwrap_or_default()
+fn source_slice(source: &str, start: u32, end: u32) -> &str {
+    source
+        .get(start as usize..end as usize)
+        .unwrap_or_default()
 }
 
 fn push_indent(out: &mut String, indent: usize) {

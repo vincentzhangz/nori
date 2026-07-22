@@ -33,14 +33,16 @@ impl Drop for TempDir {
 
 #[test]
 fn lexer_tracks_markup_text_and_spans() {
-    let tokens =
-        lex("return <button type=\"button\" onclick={() => count.value += 1}>Click</button>;")
-            .unwrap();
+    let source =
+        "return <button type=\"button\" onclick={() => count.value += 1}>Click</button>;";
+    let tokens = lex(source).unwrap();
+    let map = nori::ast::SourceMap::new(source);
 
     assert!(tokens.iter().any(|token| token.lexeme == "button"));
     assert!(tokens.iter().any(|token| token.lexeme == "Click"));
-    assert_eq!(tokens[0].span.line, 1);
-    assert_eq!(tokens[0].span.column, 1);
+    let pos = map.span_start(tokens[0].span);
+    assert_eq!(pos.line, 1);
+    assert_eq!(pos.column, 1);
 }
 
 #[test]

@@ -193,10 +193,12 @@ fn emit_hmr_event(path: &Path) {
 
 fn lex_command(input: &Path) -> Result<()> {
     let source = fs::read_to_string(input).into_diagnostic()?;
+    let map = nori::ast::SourceMap::new(&source);
     for token in lex(&source)? {
+        let pos = map.span_start(token.span);
         println!(
             "{:?} {:?} @ {}:{}",
-            token.kind, token.lexeme, token.span.line, token.span.column
+            token.kind, token.lexeme, pos.line, pos.column
         );
     }
     Ok(())
