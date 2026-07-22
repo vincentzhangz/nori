@@ -13,11 +13,12 @@ pub struct Program {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Import(RawStmt),
+    Import(ImportDecl),
     TypeOnly(RawStmt),
     Class(ClassDecl),
     Var(VarDecl),
     Function(FunctionDecl),
+    Export(ExportDecl),
     ExportDefaultFunction(FunctionDecl),
     ExportDefaultExpr(Expr),
     Return(Option<Expr>, Span),
@@ -26,6 +27,16 @@ pub enum Stmt {
     If(IfStmt),
     Try(TryStmt),
     For(ForStmt),
+    ClassicFor(Box<ClassicForStmt>),
+    While(WhileStmt),
+    DoWhile(DoWhileStmt),
+    Switch(SwitchStmt),
+    Throw(ThrowStmt),
+    Label(LabelStmt),
+    Debugger(Span),
+    With(WithStmt),
+    Break(Span),
+    Continue(Span),
     Raw(RawStmt),
 }
 
@@ -44,7 +55,70 @@ pub struct ForStmt {
     pub name: String,
     pub iterable: Expr,
     pub is_of: bool,
-    pub body: BlockStmt,
+    pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassicForStmt {
+    pub init: Option<ForInit>,
+    pub condition: Option<Expr>,
+    pub update: Option<Expr>,
+    pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForInit {
+    Var(VarDecl),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileStmt {
+    pub condition: Expr,
+    pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoWhileStmt {
+    pub body: Box<Stmt>,
+    pub condition: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchStmt {
+    pub discriminant: Expr,
+    pub cases: Vec<SwitchCase>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchCase {
+    pub test: Option<Expr>,
+    pub consequent: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThrowStmt {
+    pub argument: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelStmt {
+    pub label: String,
+    pub body: Box<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithStmt {
+    pub object: Expr,
+    pub body: Box<Stmt>,
     pub span: Span,
 }
 
@@ -52,13 +126,117 @@ pub struct ForStmt {
 pub struct ClassDecl {
     pub name: String,
     pub extends: Option<String>,
-    pub body: Vec<Stmt>,
+    pub members: Vec<ClassMember>,
+    pub decorators: Vec<Decorator>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decorator {
+    pub name: String,
+    pub args: Option<Vec<Expr>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassMember {
+    Field(ClassField),
+    Constructor(ClassConstructor),
+    Method(ClassMethod),
+    Accessor(ClassAccessor),
+    StaticBlock(ClassStaticBlock),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassField {
+    pub name: String,
+    pub value: Option<Expr>,
+    pub is_static: bool,
+    pub is_private: bool,
+    pub computed: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassConstructor {
+    pub params: Vec<Param>,
+    pub body: BlockStmt,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMethod {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: BlockStmt,
+    pub is_static: bool,
+    pub is_async: bool,
+    pub is_get: bool,
+    pub is_set: bool,
+    pub is_private: bool,
+    pub computed: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassAccessor {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: BlockStmt,
+    pub is_static: bool,
+    pub is_get: bool,
+    pub is_private: bool,
+    pub computed: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassStaticBlock {
+    pub body: BlockStmt,
     pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawStmt {
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportDecl {
+    pub specifiers: Vec<ImportSpecifier>,
+    pub source: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportSpecifier {
+    Default(String),
+    Named {
+        local: String,
+        imported: Option<String>,
+    },
+    Namespace(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportDecl {
+    Named {
+        specifiers: Vec<ExportSpecifier>,
+        source: Option<String>,
+        span: Span,
+    },
+    All {
+        source: String,
+        as_namespace: Option<String>,
+        span: Span,
+    },
+    Declaration(Box<Stmt>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSpecifier {
+    pub local: String,
+    pub exported: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,14 +270,37 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDeclarator {
     pub name: String,
-    pub pattern: Option<DestructuringPattern>,
+    pub pattern: Option<Pattern>,
     pub init: Option<Expr>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DestructuringPattern {
-    pub kind: DestructuringKind,
+pub enum Pattern {
+    Ident(String),
+    Rest(Box<Pattern>),
+    Array {
+        elements: Vec<Option<Pattern>>,
+        rest: Option<Box<Pattern>>,
+        span: Span,
+    },
+    Object {
+        properties: Vec<ObjectPatternProp>,
+        rest: Option<Box<Pattern>>,
+        span: Span,
+    },
+    Assign {
+        left: Box<Pattern>,
+        right: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectPatternProp {
+    pub key: String,
+    pub alias: Option<String>,
+    pub value: Option<Box<Pattern>>,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
@@ -109,6 +310,7 @@ pub struct FunctionDecl {
     pub params: Vec<Param>,
     pub body: BlockStmt,
     pub async_token: Option<Span>,
+    pub generator: bool,
     pub decorators: Vec<Span>,
     pub span: Span,
 }
@@ -117,6 +319,7 @@ pub struct FunctionDecl {
 pub struct Param {
     pub name: String,
     pub default: Option<Expr>,
+    pub is_property: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,11 +332,43 @@ pub struct Expr {
 pub enum ExprKind {
     Ident(String),
     Number(String),
+    BigInt(String),
     String(String),
+    RegExp {
+        pattern: String,
+        flags: String,
+    },
     Bool(bool),
     Null,
+    This,
+    New {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    Delete(Box<Expr>),
+    Void(Box<Expr>),
+    Typeof(Box<Expr>),
+    MetaProperty {
+        meta: String,
+        property: String,
+    },
+    Import(Box<Expr>),
+    Sequence(Vec<Expr>),
+    Yield {
+        value: Option<Box<Expr>>,
+        delegate: bool,
+    },
     Unary {
         op: String,
+        expr: Box<Expr>,
+    },
+    Update {
+        op: String,
+        expr: Box<Expr>,
+        prefix: bool,
+    },
+    TypeErasure {
+        kind: TypeErasureKind,
         expr: Box<Expr>,
     },
     Binary {
@@ -154,21 +389,32 @@ pub enum ExprKind {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        optional: bool,
     },
     Member {
         object: Box<Expr>,
         property: String,
+        optional: bool,
     },
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+        optional: bool,
     },
     Arrow {
         params: Vec<String>,
-        body: Box<Expr>,
+        body: ArrowBody,
+    },
+    TemplateLiteral {
+        quasis: Vec<String>,
+        exprs: Vec<Expr>,
+    },
+    TaggedTemplate {
+        tag: Box<Expr>,
+        quasi: Box<Expr>,
     },
     Array(Vec<Expr>),
-    Object,
+    Object(Vec<ObjectProperty>),
     Spread {
         expr: Box<Expr>,
     },
@@ -178,9 +424,42 @@ pub enum ExprKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DestructuringKind {
-    Array(Vec<String>, Span),
-    Object(Vec<(String, Option<String>)>, Span),
+pub enum ArrowBody {
+    Expression(Box<Expr>),
+    Block(BlockStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectProperty {
+    pub key: PropertyKey,
+    pub value: Expr,
+    pub kind: PropertyKind,
+    pub computed: bool,
+    pub shorthand: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropertyKey {
+    Ident(String),
+    String(String),
+    Number(String),
+    Computed(Box<Expr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyKind {
+    Init,
+    Get,
+    Set,
+    Method,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeErasureKind {
+    As,
+    Satisfies,
+    NonNull,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -7,7 +7,7 @@ pub use nori_diagnostic::NoriError;
 pub use nori_lexer::lex;
 pub use nori_parser::{Parser, Syntax};
 pub mod lexer {
-    pub use nori_lexer::lex;
+    pub use nori_lexer::{Keyword, LexContext, Token, TokenKind, lex, lex_with_context};
 }
 pub mod parser {
     pub use nori_parser::{Parser, Syntax};

@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use nori_analyzer::{Analysis, primitive_call_name};
 use nori_ast::{
-    BlockStmt, DestructuringKind, DestructuringPattern, Expr, ExprKind, ForStmt, FunctionDecl,
-    IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Program, Span, Stmt, TryStmt,
-    VarDecl, VarKind,
+    ArrowBody, BlockStmt, ClassAccessor, ClassConstructor, ClassField, ClassMember, ClassMethod,
+    ClassStaticBlock, ClassicForStmt, DoWhileStmt, Expr, ExprKind, ForInit, ForStmt, FunctionDecl,
+    IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param, Pattern, Program, Span,
+    Stmt, TryStmt, VarDecl, VarKind, WhileStmt,
 };
 
 #[derive(Debug, Clone)]
@@ -40,9 +41,95 @@ pub fn generate(
     out.trim_end().to_string()
 }
 
+fn emit_import(_source: &str, import: &nori_ast::ImportDecl, out: &mut String) {
+    out.push_str("import ");
+    if !import.specifiers.is_empty() {
+        for (idx, spec) in import.specifiers.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            match spec {
+                nori_ast::ImportSpecifier::Default(name) => out.push_str(name),
+                nori_ast::ImportSpecifier::Named { local, imported } => {
+                    if let Some(imported) = imported {
+                        out.push_str(imported);
+                        out.push_str(" as ");
+                        out.push_str(local);
+                    } else {
+                        out.push_str(local);
+                    }
+                }
+                nori_ast::ImportSpecifier::Namespace(name) => {
+                    out.push_str("* as ");
+                    out.push_str(name);
+                }
+            }
+        }
+        out.push_str(" from ");
+    }
+    out.push_str(&import.source);
+    out.push(';');
+}
+
+fn emit_export(source: &str, export: &nori_ast::ExportDecl, out: &mut String, indent: usize) {
+    match export {
+        nori_ast::ExportDecl::Named {
+            specifiers,
+            source: src,
+            ..
+        } => {
+            out.push_str("export { ");
+            for (idx, spec) in specifiers.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                if let Some(exported) = &spec.exported {
+                    out.push_str(&spec.local);
+                    out.push_str(" as ");
+                    out.push_str(exported);
+                } else {
+                    out.push_str(&spec.local);
+                }
+            }
+            out.push_str(" }");
+            if let Some(src) = src {
+                out.push_str(" from ");
+                out.push_str(src);
+            }
+            out.push(';');
+        }
+        nori_ast::ExportDecl::All {
+            source: src,
+            as_namespace,
+            ..
+        } => {
+            out.push_str("export *");
+            if let Some(ns) = as_namespace {
+                out.push_str(" as ");
+                out.push_str(ns);
+            }
+            out.push_str(" from ");
+            out.push_str(src);
+            out.push(';');
+        }
+        nori_ast::ExportDecl::Declaration(stmt) => {
+            push_indent(out, indent);
+            out.push_str("export ");
+            emit_stmt(source, stmt, out, 0);
+        }
+    }
+}
+
 fn emit_stmt(source: &str, stmt: &Stmt, out: &mut String, indent: usize) {
     match stmt {
-        Stmt::Import(raw) | Stmt::Raw(raw) => {
+        Stmt::Import(import) => {
+            push_indent(out, indent);
+            emit_import(source, import, out);
+        }
+        Stmt::Export(export) => {
+            emit_export(source, export, out, indent);
+        }
+        Stmt::Raw(raw) => {
             push_indent(out, indent);
             out.push_str(source_slice(source, raw.span.start, raw.span.end).trim());
         }
@@ -72,28 +159,54 @@ fn emit_stmt(source: &str, stmt: &Stmt, out: &mut String, indent: usize) {
         }
         Stmt::Block(block) => emit_block(source, block, out, indent),
         Stmt::If(stmt) => emit_if(source, stmt, out, indent),
-        Stmt::Class(class) => {
-            push_indent(out, indent);
-            out.push_str("class ");
-            out.push_str(&class.name);
-            if let Some(extends) = &class.extends {
-                out.push_str(" extends ");
-                out.push_str(extends);
-            }
-            out.push_str(" { ");
-            for stmt in &class.body {
-                emit_stmt(source, stmt, out, 0);
-                out.push(' ');
-            }
-            out.push('}');
-        }
+        Stmt::Class(class) => emit_class(source, class, out, indent),
         Stmt::Try(stmt) => emit_try(source, stmt, out, indent),
         Stmt::For(stmt) => emit_for(source, stmt, out, indent),
+        Stmt::ClassicFor(stmt) => emit_classic_for(source, stmt, out, indent),
+        Stmt::While(stmt) => emit_while(source, stmt, out, indent),
+        Stmt::DoWhile(stmt) => emit_do_while(source, stmt, out, indent),
+        Stmt::Break(_) => {
+            push_indent(out, indent);
+            out.push_str("break;");
+        }
+        Stmt::Continue(_) => {
+            push_indent(out, indent);
+            out.push_str("continue;");
+        }
+        Stmt::Switch(stmt) => emit_switch(source, stmt, out, indent),
+        Stmt::Throw(stmt) => {
+            push_indent(out, indent);
+            out.push_str("throw ");
+            emit_expr(source, &stmt.argument, out);
+            out.push(';');
+        }
+        Stmt::Label(stmt) => {
+            push_indent(out, indent);
+            out.push_str(&stmt.label);
+            out.push_str(": ");
+            emit_stmt(source, &stmt.body, out, 0);
+        }
+        Stmt::Debugger(_) => {
+            push_indent(out, indent);
+            out.push_str("debugger;");
+        }
+        Stmt::With(stmt) => {
+            push_indent(out, indent);
+            out.push_str("with (");
+            emit_expr(source, &stmt.object, out);
+            out.push_str(") ");
+            emit_stmt(source, &stmt.body, out, 0);
+        }
     }
 }
 
 fn emit_var(source: &str, var: &VarDecl, out: &mut String, indent: usize) {
     push_indent(out, indent);
+    emit_var_head(source, var, out);
+    out.push(';');
+}
+
+fn emit_var_head(source: &str, var: &VarDecl, out: &mut String) {
     out.push_str(match var.kind {
         VarKind::Const => "const ",
         VarKind::Let => "let ",
@@ -114,34 +227,67 @@ fn emit_var(source: &str, var: &VarDecl, out: &mut String, indent: usize) {
             emit_expr(source, init, out);
         }
     }
-    out.push(';');
 }
 
-fn emit_destructuring_pattern(pattern: &DestructuringPattern, out: &mut String) {
-    match &pattern.kind {
-        DestructuringKind::Array(names, _) => {
+fn emit_destructuring_pattern(pattern: &Pattern, out: &mut String) {
+    match pattern {
+        Pattern::Ident(name) => out.push_str(name),
+        Pattern::Array { elements, rest, .. } => {
             out.push('[');
-            for (idx, name) in names.iter().enumerate() {
+            for (idx, element) in elements.iter().enumerate() {
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(name);
+                if let Some(pattern) = element {
+                    emit_destructuring_pattern(pattern, out);
+                }
+            }
+            if let Some(rest) = rest {
+                if !elements.is_empty() {
+                    out.push_str(", ");
+                }
+                out.push_str("...");
+                emit_destructuring_pattern(rest, out);
             }
             out.push(']');
         }
-        DestructuringKind::Object(props, _) => {
+        Pattern::Object {
+            properties, rest, ..
+        } => {
             out.push('{');
-            for (idx, (name, default)) in props.iter().enumerate() {
+            for (idx, prop) in properties.iter().enumerate() {
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(name);
-                if let Some(default) = default {
+                if let Some(alias) = &prop.alias {
+                    out.push_str(&prop.key);
+                    out.push_str(": ");
+                    out.push_str(alias);
+                } else {
+                    out.push_str(&prop.key);
+                }
+                if let Some(default) = &prop.default {
                     out.push_str(" = ");
-                    out.push_str(default);
+                    emit_expr("", default, out);
                 }
             }
+            if let Some(rest) = rest {
+                if !properties.is_empty() {
+                    out.push_str(", ");
+                }
+                out.push_str("...");
+                emit_destructuring_pattern(rest, out);
+            }
             out.push('}');
+        }
+        Pattern::Rest(pattern) => {
+            out.push_str("...");
+            emit_destructuring_pattern(pattern, out);
+        }
+        Pattern::Assign { left, right } => {
+            emit_destructuring_pattern(left, out);
+            out.push_str(" = ");
+            emit_expr("", right, out);
         }
     }
 }
@@ -161,12 +307,21 @@ fn emit_function(
         out.push_str("async ");
     }
     out.push_str("function");
+    if function.generator {
+        out.push('*');
+    }
     if let Some(name) = &function.name {
         out.push(' ');
         out.push_str(name);
     }
     out.push('(');
-    for (idx, param) in function.params.iter().enumerate() {
+    emit_params(source, &function.params, out);
+    out.push_str(") ");
+    emit_block(source, &function.body, out, indent);
+}
+
+fn emit_params(source: &str, params: &[Param], out: &mut String) {
+    for (idx, param) in params.iter().enumerate() {
         if idx > 0 {
             out.push_str(", ");
         }
@@ -176,8 +331,200 @@ fn emit_function(
             emit_expr(source, default, out);
         }
     }
+}
+
+fn emit_class(source: &str, class: &nori_ast::ClassDecl, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("class ");
+    out.push_str(&class.name);
+    if let Some(extends) = &class.extends {
+        out.push_str(" extends ");
+        out.push_str(extends);
+    }
+    out.push_str(" {\n");
+    for member in &class.members {
+        emit_class_member(source, member, out, indent + 1, class.extends.is_some());
+        out.push('\n');
+    }
+    push_indent(out, indent);
+    out.push('}');
+}
+
+fn emit_class_member(
+    source: &str,
+    member: &ClassMember,
+    out: &mut String,
+    indent: usize,
+    derived: bool,
+) {
+    match member {
+        ClassMember::Field(field) => emit_class_field(source, field, out, indent),
+        ClassMember::Constructor(constructor) => {
+            emit_class_constructor(source, constructor, out, indent, derived);
+        }
+        ClassMember::Method(method) => emit_class_method(source, method, out, indent),
+        ClassMember::Accessor(accessor) => emit_class_accessor(source, accessor, out, indent),
+        ClassMember::StaticBlock(block) => emit_class_static_block(source, block, out, indent),
+    }
+}
+
+fn emit_class_field(source: &str, field: &ClassField, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    if field.is_static {
+        out.push_str("static ");
+    }
+    emit_member_name(&field.name, field.is_private, &field.computed, source, out);
+    if let Some(value) = &field.value {
+        out.push_str(" = ");
+        emit_expr(source, value, out);
+    }
+    out.push(';');
+}
+
+fn emit_member_name(
+    name: &str,
+    is_private: bool,
+    computed: &Option<Box<Expr>>,
+    source: &str,
+    out: &mut String,
+) {
+    if is_private {
+        out.push('#');
+    }
+    if let Some(expr) = computed {
+        out.push('[');
+        emit_expr(source, expr, out);
+        out.push(']');
+    } else {
+        out.push_str(name);
+    }
+}
+
+fn emit_class_constructor(
+    source: &str,
+    constructor: &ClassConstructor,
+    out: &mut String,
+    indent: usize,
+    derived: bool,
+) {
+    push_indent(out, indent);
+    out.push_str("constructor(");
+    emit_params(source, &constructor.params, out);
     out.push_str(") ");
-    emit_block(source, &function.body, out, indent);
+    emit_constructor_body(source, constructor, out, indent, derived);
+}
+
+fn emit_class_method(source: &str, method: &ClassMethod, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    if method.is_static {
+        out.push_str("static ");
+    }
+    if method.is_async {
+        out.push_str("async ");
+    }
+    if method.is_get {
+        out.push_str("get ");
+    }
+    if method.is_set {
+        out.push_str("set ");
+    }
+    emit_member_name(
+        &method.name,
+        method.is_private,
+        &method.computed,
+        source,
+        out,
+    );
+    out.push('(');
+    emit_params(source, &method.params, out);
+    out.push_str(") ");
+    emit_block(source, &method.body, out, indent);
+}
+
+fn emit_class_accessor(source: &str, accessor: &ClassAccessor, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    if accessor.is_static {
+        out.push_str("static ");
+    }
+    if accessor.is_get {
+        out.push_str("get ");
+    } else {
+        out.push_str("set ");
+    }
+    emit_member_name(
+        &accessor.name,
+        accessor.is_private,
+        &accessor.computed,
+        source,
+        out,
+    );
+    out.push('(');
+    emit_params(source, &accessor.params, out);
+    out.push_str(") ");
+    emit_block(source, &accessor.body, out, indent);
+}
+
+fn emit_class_static_block(
+    source: &str,
+    block: &ClassStaticBlock,
+    out: &mut String,
+    indent: usize,
+) {
+    push_indent(out, indent);
+    out.push_str("static ");
+    emit_block(source, &block.body, out, indent);
+}
+
+fn emit_constructor_body(
+    source: &str,
+    constructor: &ClassConstructor,
+    out: &mut String,
+    indent: usize,
+    derived: bool,
+) {
+    out.push_str("{\n");
+    let params = constructor
+        .params
+        .iter()
+        .filter(|param| param.is_property)
+        .collect::<Vec<_>>();
+    let first_body_index = if derived
+        && constructor
+            .body
+            .body
+            .first()
+            .is_some_and(is_super_call_stmt)
+    {
+        emit_stmt(source, &constructor.body.body[0], out, indent + 1);
+        out.push('\n');
+        1
+    } else {
+        0
+    };
+    for param in params {
+        push_indent(out, indent + 1);
+        out.push_str("this.");
+        out.push_str(&param.name);
+        out.push_str(" = ");
+        out.push_str(&param.name);
+        out.push_str(";\n");
+    }
+    for stmt in &constructor.body.body[first_body_index..] {
+        emit_stmt(source, stmt, out, indent + 1);
+        out.push('\n');
+    }
+    push_indent(out, indent);
+    out.push('}');
+}
+
+fn is_super_call_stmt(stmt: &Stmt) -> bool {
+    let Stmt::Expr(expr) = stmt else {
+        return false;
+    };
+    let ExprKind::Call { callee, .. } = &expr.kind else {
+        return false;
+    };
+    matches!(&callee.kind, ExprKind::Ident(name) if name == "super")
 }
 
 fn emit_block(source: &str, block: &BlockStmt, out: &mut String, indent: usize) {
@@ -231,7 +578,69 @@ fn emit_for(source: &str, stmt: &ForStmt, out: &mut String, indent: usize) {
     out.push_str(if stmt.is_of { " of " } else { " in " });
     emit_expr(source, &stmt.iterable, out);
     out.push_str(") ");
-    emit_block(source, &stmt.body, out, indent);
+    emit_stmt(source, &stmt.body, out, 0);
+}
+
+fn emit_classic_for(source: &str, stmt: &ClassicForStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("for (");
+    if let Some(init) = &stmt.init {
+        match init {
+            ForInit::Var(var) => emit_var_head(source, var, out),
+            ForInit::Expr(expr) => emit_expr(source, expr, out),
+        }
+    }
+    out.push_str("; ");
+    if let Some(condition) = &stmt.condition {
+        emit_expr(source, condition, out);
+    }
+    out.push_str("; ");
+    if let Some(update) = &stmt.update {
+        emit_expr(source, update, out);
+    }
+    out.push_str(") ");
+    emit_stmt(source, &stmt.body, out, 0);
+}
+
+fn emit_while(source: &str, stmt: &WhileStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("while (");
+    emit_expr(source, &stmt.condition, out);
+    out.push_str(") ");
+    emit_stmt(source, &stmt.body, out, 0);
+}
+
+fn emit_do_while(source: &str, stmt: &DoWhileStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("do ");
+    emit_stmt(source, &stmt.body, out, 0);
+    out.push_str(" while (");
+    emit_expr(source, &stmt.condition, out);
+    out.push_str(");");
+}
+
+fn emit_switch(source: &str, stmt: &nori_ast::SwitchStmt, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    out.push_str("switch (");
+    emit_expr(source, &stmt.discriminant, out);
+    out.push_str(") {\n");
+    for case in &stmt.cases {
+        push_indent(out, indent + 1);
+        match &case.test {
+            Some(test) => {
+                out.push_str("case ");
+                emit_expr(source, test, out);
+                out.push_str(":\n");
+            }
+            None => out.push_str("default:\n"),
+        }
+        for s in &case.consequent {
+            emit_stmt(source, s, out, indent + 2);
+            out.push('\n');
+        }
+    }
+    push_indent(out, indent);
+    out.push('}');
 }
 
 fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
@@ -242,13 +651,86 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
 
     match &expr.kind {
         ExprKind::Ident(name) => out.push_str(name),
-        ExprKind::Number(number) | ExprKind::String(number) => out.push_str(number),
+        ExprKind::Number(number) => out.push_str(number),
+        ExprKind::BigInt(number) => {
+            out.push_str(number);
+        }
+        ExprKind::String(s) => out.push_str(s),
+        ExprKind::RegExp { pattern, flags } => {
+            out.push('/');
+            out.push_str(pattern);
+            out.push('/');
+            out.push_str(flags);
+        }
         ExprKind::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         ExprKind::Null => out.push_str("null"),
+        ExprKind::This => out.push_str("this"),
+        ExprKind::New { callee, args } => {
+            out.push_str("new ");
+            emit_expr(source, callee, out);
+            out.push('(');
+            for (idx, arg) in args.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                emit_expr(source, arg, out);
+            }
+            out.push(')');
+        }
+        ExprKind::Delete(expr) => {
+            out.push_str("delete ");
+            emit_expr(source, expr, out);
+        }
+        ExprKind::Void(expr) => {
+            out.push_str("void ");
+            emit_expr(source, expr, out);
+        }
+        ExprKind::Typeof(expr) => {
+            out.push_str("typeof ");
+            emit_expr(source, expr, out);
+        }
+        ExprKind::MetaProperty { meta, property } => {
+            out.push_str(meta);
+            out.push('.');
+            out.push_str(property);
+        }
+        ExprKind::Import(expr) => {
+            out.push_str("import(");
+            emit_expr(source, expr, out);
+            out.push(')');
+        }
+        ExprKind::Sequence(exprs) => {
+            for (idx, e) in exprs.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                emit_expr(source, e, out);
+            }
+        }
+        ExprKind::Yield { value, delegate } => {
+            out.push_str("yield");
+            if *delegate {
+                out.push('*');
+            }
+            if let Some(expr) = value {
+                out.push(' ');
+                emit_expr(source, expr, out);
+            }
+        }
         ExprKind::Unary { op, expr } => {
             out.push_str(op);
             emit_expr(source, expr, out);
         }
+        ExprKind::Update { op, expr, prefix } => {
+            if *prefix {
+                out.push_str(op);
+            }
+            emit_expr(source, expr, out);
+            if !*prefix {
+                out.push_str(op);
+            }
+        }
+        ExprKind::TypeErasure { expr, .. } => emit_expr(source, expr, out),
         ExprKind::Binary { left, op, right } | ExprKind::Assign { left, op, right } => {
             emit_expr(source, left, out);
             out.push(' ');
@@ -267,8 +749,15 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             out.push_str(" : ");
             emit_expr(source, alternate, out);
         }
-        ExprKind::Call { callee, args } => {
+        ExprKind::Call {
+            callee,
+            args,
+            optional,
+        } => {
             emit_expr(source, callee, out);
+            if *optional {
+                out.push_str("?.");
+            }
             out.push('(');
             for (idx, arg) in args.iter().enumerate() {
                 if idx > 0 {
@@ -278,14 +767,30 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             }
             out.push(')');
         }
-        ExprKind::Member { object, property } => {
+        ExprKind::Member {
+            object,
+            property,
+            optional,
+        } => {
             emit_expr(source, object, out);
-            out.push('.');
+            if *optional {
+                out.push_str("?.");
+            } else {
+                out.push('.');
+            }
             out.push_str(property);
         }
-        ExprKind::Index { object, index } => {
+        ExprKind::Index {
+            object,
+            index,
+            optional,
+        } => {
             emit_expr(source, object, out);
-            out.push('[');
+            if *optional {
+                out.push_str("?.[");
+            } else {
+                out.push('[');
+            }
             emit_expr(source, index, out);
             out.push(']');
         }
@@ -298,7 +803,26 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
                 out.push(')');
             }
             out.push_str(" => ");
-            emit_expr(source, body, out);
+            match body {
+                ArrowBody::Expression(expr) => emit_expr(source, expr, out),
+                ArrowBody::Block(block) => emit_block(source, block, out, 0),
+            }
+        }
+        ExprKind::TemplateLiteral { quasis, exprs } => {
+            out.push('`');
+            for (idx, quasi) in quasis.iter().enumerate() {
+                out.push_str(quasi);
+                if let Some(expr) = exprs.get(idx) {
+                    out.push_str("${");
+                    emit_expr(source, expr, out);
+                    out.push('}');
+                }
+            }
+            out.push('`');
+        }
+        ExprKind::TaggedTemplate { tag, quasi } => {
+            emit_expr(source, tag, out);
+            emit_expr(source, quasi, out);
         }
         ExprKind::Array(items) => {
             out.push('[');
@@ -310,6 +834,42 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             }
             out.push(']');
         }
+        ExprKind::Object(properties) => {
+            if properties.is_empty() {
+                out.push_str("{}");
+            } else {
+                out.push_str("{ ");
+                for (idx, prop) in properties.iter().enumerate() {
+                    if idx > 0 {
+                        out.push_str(", ");
+                    }
+                    if prop.shorthand {
+                        out.push_str(&match &prop.key {
+                            nori_ast::PropertyKey::Ident(name) => name.clone(),
+                            _ => String::new(),
+                        });
+                    } else {
+                        match &prop.key {
+                            nori_ast::PropertyKey::Ident(name) => out.push_str(name),
+                            nori_ast::PropertyKey::String(s) => {
+                                out.push('"');
+                                out.push_str(s);
+                                out.push('"');
+                            }
+                            nori_ast::PropertyKey::Number(n) => out.push_str(n),
+                            nori_ast::PropertyKey::Computed(expr) => {
+                                out.push('[');
+                                emit_expr(source, expr, out);
+                                out.push(']');
+                            }
+                        }
+                        out.push_str(": ");
+                        emit_expr(source, &prop.value, out);
+                    }
+                }
+                out.push_str(" }");
+            }
+        }
         ExprKind::Spread { expr } => {
             out.push_str("...");
             emit_expr(source, expr, out);
@@ -319,7 +879,7 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             emit_expr(source, expr, out);
         }
         ExprKind::Markup(node) => emit_markup_source(source, node, out),
-        ExprKind::Object | ExprKind::Raw => {
+        ExprKind::Raw => {
             out.push_str(source_slice(source, expr.span.start, expr.span.end).trim());
         }
     }
@@ -328,27 +888,78 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
 fn emit_markup_source(source: &str, node: &MarkupNode, out: &mut String) {
     let span = markup_span(node);
     let mut text = source_slice(source, span.start, span.end).to_string();
-    let mut insertions = Vec::new();
-    collect_button_type_insertions(node, &mut insertions);
-    insertions.sort_unstable_by(|a, b| b.cmp(a));
+    let mut edits = Vec::new();
+    collect_markup_expr_replacements(source, node, &mut edits);
+    collect_button_type_insertions(node, &mut edits);
+    edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0));
 
-    for insertion in insertions {
-        if (span.start..=span.end).contains(&insertion) {
-            text.insert_str(insertion - span.start, r#" type="button""#);
+    for (start, end, replacement) in edits {
+        if span.start <= start && end <= span.end {
+            text.replace_range(start - span.start..end - span.start, &replacement);
         }
     }
 
     out.push_str(text.trim());
 }
 
-fn collect_button_type_insertions(node: &MarkupNode, insertions: &mut Vec<usize>) {
+fn collect_markup_expr_replacements(
+    source: &str,
+    node: &MarkupNode,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
     match node {
         MarkupNode::Element(element) => {
-            collect_button_type_insertions_from_element(element, insertions)
+            for attribute in &element.attributes {
+                match attribute {
+                    MarkupAttribute::Named {
+                        value: Some(expr), ..
+                    }
+                    | MarkupAttribute::Spread { expr, .. } => {
+                        push_markup_expr_replacement(source, expr, edits);
+                    }
+                    MarkupAttribute::Named { value: None, .. } => {}
+                }
+            }
+            for child in &element.children {
+                collect_markup_expr_replacements_from_child(source, child, edits);
+            }
         }
         MarkupNode::Fragment { children, .. } => {
             for child in children {
-                collect_button_type_insertions_from_child(child, insertions);
+                collect_markup_expr_replacements_from_child(source, child, edits);
+            }
+        }
+    }
+}
+
+fn collect_markup_expr_replacements_from_child(
+    source: &str,
+    child: &MarkupChild,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
+    match child {
+        MarkupChild::Expr(expr) => push_markup_expr_replacement(source, expr, edits),
+        MarkupChild::Node(node) => collect_markup_expr_replacements(source, node, edits),
+        MarkupChild::Text(_, _) => {}
+    }
+}
+
+fn push_markup_expr_replacement(
+    source: &str,
+    expr: &Expr,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
+    let mut replacement = String::new();
+    emit_expr(source, expr, &mut replacement);
+    edits.push((expr.span.start, expr.span.end, replacement));
+}
+
+fn collect_button_type_insertions(node: &MarkupNode, edits: &mut Vec<(usize, usize, String)>) {
+    match node {
+        MarkupNode::Element(element) => collect_button_type_insertions_from_element(element, edits),
+        MarkupNode::Fragment { children, .. } => {
+            for child in children {
+                collect_button_type_insertions_from_child(child, edits);
             }
         }
     }
@@ -356,24 +967,28 @@ fn collect_button_type_insertions(node: &MarkupNode, insertions: &mut Vec<usize>
 
 fn collect_button_type_insertions_from_element(
     element: &MarkupElement,
-    insertions: &mut Vec<usize>,
+    edits: &mut Vec<(usize, usize, String)>,
 ) {
     if element.name == "button"
         && !element.attributes.iter().any(|attribute| {
             matches!(attribute, MarkupAttribute::Named { name, .. } if name.eq_ignore_ascii_case("type"))
         })
     {
-        insertions.push(element.span.start + 1 + element.name.len());
+        let offset = element.span.start + 1 + element.name.len();
+        edits.push((offset, offset, r#" type="button""#.to_string()));
     }
 
     for child in &element.children {
-        collect_button_type_insertions_from_child(child, insertions);
+        collect_button_type_insertions_from_child(child, edits);
     }
 }
 
-fn collect_button_type_insertions_from_child(child: &MarkupChild, insertions: &mut Vec<usize>) {
+fn collect_button_type_insertions_from_child(
+    child: &MarkupChild,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
     if let MarkupChild::Node(node) = child {
-        collect_button_type_insertions(node, insertions);
+        collect_button_type_insertions(node, edits);
     }
 }
 
@@ -385,6 +1000,7 @@ fn markup_span(node: &MarkupNode) -> Span {
 }
 
 fn emit_primitive_call(source: &str, expr: &Expr, name: &str, out: &mut String) {
+    let expr = erase_type_wrappers(expr);
     let ExprKind::Call { args, .. } = &expr.kind else {
         return;
     };
@@ -408,6 +1024,13 @@ fn emit_primitive_call(source: &str, expr: &Expr, name: &str, out: &mut String) 
         }
         _ => {}
     }
+}
+
+fn erase_type_wrappers(mut expr: &Expr) -> &Expr {
+    while let ExprKind::TypeErasure { expr: inner, .. } = &expr.kind {
+        expr = inner;
+    }
+    expr
 }
 
 fn emit_arg_list(source: &str, args: &[Expr], out: &mut String) {

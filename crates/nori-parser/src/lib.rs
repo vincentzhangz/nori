@@ -3,9 +3,11 @@ mod syntax;
 
 use cursor::TokenCursor;
 use nori_ast::{
-    BlockStmt, ClassDecl, DestructuringKind, DestructuringPattern, Expr, ExprKind, ForStmt,
-    FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param, Program,
-    RawStmt, Span, Stmt, TryStmt, VarDecl, VarDeclarator, VarKind,
+    ArrowBody, BlockStmt, ClassAccessor, ClassConstructor, ClassDecl, ClassField, ClassMember,
+    ClassMethod, ClassStaticBlock, ClassicForStmt, Decorator, DoWhileStmt, Expr, ExprKind, ForInit,
+    ForStmt, FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param,
+    Pattern, Program, RawStmt, Span, Stmt, TryStmt, TypeErasureKind, VarDecl, VarDeclarator,
+    VarKind, WhileStmt,
 };
 use nori_diagnostic::{NoriError, span as source_span};
 use nori_lexer::{Keyword, Token, TokenKind};
@@ -15,6 +17,16 @@ pub struct Parser {
     filename: String,
     input: TokenCursor,
     syntax: Syntax,
+    loop_depth: usize,
+}
+
+#[derive(Default)]
+struct ClassMemberModifiers {
+    is_static: bool,
+    is_async: bool,
+    is_get: bool,
+    is_set: bool,
+    declaration_only: bool,
 }
 
 impl Parser {
@@ -32,6 +44,7 @@ impl Parser {
             filename,
             input: TokenCursor::new(tokens),
             syntax,
+            loop_depth: 0,
         }
     }
 
@@ -48,24 +61,23 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, NoriError> {
         if self.at_keyword(Keyword::Import) {
-            return Ok(Stmt::Import(self.parse_raw_until_semicolon()));
+            return self.parse_import();
         }
         if self.syntax.typescript
             && (self.at_keyword(Keyword::Type) || self.at_keyword(Keyword::Interface))
         {
             return self.parse_type_only().map(Stmt::TypeOnly);
         }
-        if self.syntax.typescript && self.at_keyword(Keyword::Class) {
+        if self.syntax.typescript
+            && (self.at_keyword(Keyword::Class)
+                || self.at(TokenKind::At)
+                || (self.at_contextual_ident("abstract")
+                    && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Class))))
+        {
             return self.parse_class().map(Stmt::Class);
         }
         if self.at_keyword(Keyword::Export) {
             return self.parse_export();
-        }
-        if self.at(TokenKind::At) {
-            return Err(self.error_here("decorators are not supported"));
-        }
-        if self.at_keyword(Keyword::Yield) {
-            return Err(self.error_here("`yield` is not supported"));
         }
         if self.at_keyword(Keyword::Function) {
             return self.parse_function().map(Stmt::Function);
@@ -88,7 +100,41 @@ impl Parser {
             return self.parse_try();
         }
         if self.at_keyword(Keyword::For) {
+            if self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Await)) {
+                let for_span = self.bump().span;
+                self.bump(); // await
+                return self.parse_for_await(for_span);
+            }
             return self.parse_for();
+        }
+        if self.at_keyword(Keyword::While) {
+            return self.parse_while();
+        }
+        if self.at_keyword(Keyword::Do) {
+            return self.parse_do_while();
+        }
+        if self.at_keyword(Keyword::Switch) {
+            return self.parse_switch();
+        }
+        if self.at_keyword(Keyword::Throw) {
+            return self.parse_throw();
+        }
+        if self.at_keyword(Keyword::Debugger) {
+            let span = self.bump().span;
+            self.consume_optional_semicolon();
+            return Ok(Stmt::Debugger(span));
+        }
+        if self.at_keyword(Keyword::With) {
+            return self.parse_with();
+        }
+        if self.at(TokenKind::Ident) && self.peek_next_kind() == Some(TokenKind::Colon) {
+            return self.parse_label();
+        }
+        if self.at_keyword(Keyword::Break) {
+            return self.parse_loop_control("`break`", Stmt::Break);
+        }
+        if self.at_keyword(Keyword::Continue) {
+            return self.parse_loop_control("`continue`", Stmt::Continue);
         }
         if self.at(TokenKind::LeftBrace) {
             return self.parse_block().map(Stmt::Block);
@@ -98,86 +144,415 @@ impl Parser {
 
     fn parse_export(&mut self) -> Result<Stmt, NoriError> {
         let start = self.bump().span;
-        self.expect_keyword(Keyword::Default, "expected `default` after `export`")?;
-        if self.at_keyword(Keyword::Function) {
-            return self
-                .parse_function_with_start(start)
-                .map(Stmt::ExportDefaultFunction);
+        if self.matches_keyword(Keyword::Default) {
+            if self.at_keyword(Keyword::Function) {
+                return self
+                    .parse_function_with_start(start)
+                    .map(Stmt::ExportDefaultFunction);
+            }
+            if self.at_keyword(Keyword::Class)
+                || self.at(TokenKind::At)
+                || (self.at_contextual_ident("abstract")
+                    && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Class)))
+            {
+                let class = self.parse_class()?;
+                return Ok(Stmt::ExportDefaultExpr(Expr {
+                    kind: ExprKind::Raw,
+                    span: class.span,
+                }));
+            }
+            if self.at_keyword(Keyword::Async)
+                && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Function))
+            {
+                self.bump();
+                self.expect_keyword(Keyword::Function, "expected `function`")?;
+                let generator = self.matches(TokenKind::Star);
+                let async_token = Some(start);
+                let name = if self.at(TokenKind::Ident) {
+                    Some(self.bump().lexeme)
+                } else {
+                    None
+                };
+                if self.at(TokenKind::Less) {
+                    self.skip_balanced_angle_list()?;
+                }
+                self.expect(
+                    TokenKind::LeftParen,
+                    "expected `(` before function parameters",
+                )?;
+                let params = self.parse_params()?;
+                self.expect(
+                    TokenKind::RightParen,
+                    "expected `)` after function parameters",
+                )?;
+                if self.matches(TokenKind::Colon) {
+                    self.skip_type_until(&[TokenKind::LeftBrace]);
+                }
+                let body = self.parse_function_body()?;
+                let span = Span {
+                    start: start.start,
+                    end: body.span.end,
+                    line: start.line,
+                    column: start.column,
+                };
+                return Ok(Stmt::ExportDefaultFunction(FunctionDecl {
+                    name,
+                    params,
+                    body,
+                    async_token,
+                    generator,
+                    decorators: Vec::new(),
+                    span,
+                }));
+            }
+            let expr = self.parse_expression_until_statement_end()?;
+            self.consume_optional_semicolon();
+            return Ok(Stmt::ExportDefaultExpr(expr));
         }
-        if self.at_keyword(Keyword::Async)
-            && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Function))
-        {
-            self.bump();
-            self.expect_keyword(Keyword::Function, "expected `function`")?;
-            let async_token = Some(start);
-            let name = if self.at(TokenKind::Ident) {
-                Some(self.bump().lexeme)
-            } else {
-                None
-            };
-            if self.at(TokenKind::Less) {
-                self.skip_balanced_angle_list()?;
-            }
-            self.expect(
-                TokenKind::LeftParen,
-                "expected `(` before function parameters",
-            )?;
-            let params = self.parse_params()?;
-            self.expect(
-                TokenKind::RightParen,
-                "expected `)` after function parameters",
-            )?;
-            if self.matches(TokenKind::Colon) {
-                self.skip_type_until(&[TokenKind::LeftBrace]);
-            }
-            let body = self.parse_block()?;
-            let span = Span {
-                start: start.start,
-                end: body.span.end,
-                line: start.line,
-                column: start.column,
-            };
-            return Ok(Stmt::ExportDefaultFunction(FunctionDecl {
-                name,
-                params,
-                body,
-                async_token,
-                decorators: Vec::new(),
-                span,
+        Ok(Stmt::Raw(self.parse_raw_until_semicolon()))
+    }
+
+    fn parse_import(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        let mut specifiers = Vec::new();
+        if self.at(TokenKind::String) {
+            let source = self.bump().lexeme;
+            self.consume_optional_semicolon();
+            return Ok(Stmt::Import(nori_ast::ImportDecl {
+                specifiers,
+                source,
+                span: join_span(start, self.previous().span),
             }));
         }
-        let expr = self.parse_expression_until_statement_end()?;
+        if self.matches(TokenKind::Star) {
+            self.expect_contextual("as", "expected `as` after `*`")?;
+            let name = self
+                .expect(TokenKind::Ident, "expected namespace import name")?
+                .lexeme;
+            specifiers.push(nori_ast::ImportSpecifier::Namespace(name));
+        } else if self.at(TokenKind::LeftBrace) {
+            self.bump();
+            while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+                let name = self
+                    .expect(TokenKind::Ident, "expected import name")?
+                    .lexeme;
+                let imported = if self.matches_contextual_ident("as") {
+                    Some(
+                        self.expect(TokenKind::Ident, "expected import alias")?
+                            .lexeme,
+                    )
+                } else {
+                    None
+                };
+                specifiers.push(nori_ast::ImportSpecifier::Named {
+                    local: name,
+                    imported,
+                });
+                if !self.matches(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(
+                TokenKind::RightBrace,
+                "expected `}` after import specifiers",
+            )?;
+        } else {
+            let name = self
+                .expect(TokenKind::Ident, "expected default import name")?
+                .lexeme;
+            specifiers.push(nori_ast::ImportSpecifier::Default(name));
+            if self.matches(TokenKind::Comma) {
+                if self.matches(TokenKind::Star) {
+                    self.expect_contextual("as", "expected `as` after `*`")?;
+                    let name = self
+                        .expect(TokenKind::Ident, "expected namespace import name")?
+                        .lexeme;
+                    specifiers.push(nori_ast::ImportSpecifier::Namespace(name));
+                } else if self.at(TokenKind::LeftBrace) {
+                    self.bump();
+                    while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+                        let name = self
+                            .expect(TokenKind::Ident, "expected named import")?
+                            .lexeme;
+                        let imported = if self.matches_contextual_ident("as") {
+                            Some(
+                                self.expect(TokenKind::Ident, "expected import alias")?
+                                    .lexeme,
+                            )
+                        } else {
+                            None
+                        };
+                        specifiers.push(nori_ast::ImportSpecifier::Named {
+                            local: name,
+                            imported,
+                        });
+                        if !self.matches(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(
+                        TokenKind::RightBrace,
+                        "expected `}` after import specifiers",
+                    )?;
+                }
+            }
+        }
+        self.expect_keyword(Keyword::From, "expected `from` in import declaration")?;
+        let source = self
+            .expect(TokenKind::String, "expected import source")?
+            .lexeme;
         self.consume_optional_semicolon();
-        Ok(Stmt::ExportDefaultExpr(expr))
+        let span = join_span(start, self.previous().span);
+        Ok(Stmt::Import(nori_ast::ImportDecl {
+            specifiers,
+            source,
+            span,
+        }))
     }
 
     fn parse_class(&mut self) -> Result<ClassDecl, NoriError> {
-        let start = self.bump().span;
+        self.matches_contextual_ident("abstract");
+        let class_start = self.peek().span;
+        let mut decorators = Vec::new();
+        while self.at(TokenKind::At) {
+            decorators.push(self.parse_decorator()?);
+        }
+        self.expect_keyword(Keyword::Class, "expected `class` keyword")?;
+        let start = class_start;
         self.expect(TokenKind::Ident, "expected class name")?;
         let name = self.previous().lexeme.clone();
+        if self.at(TokenKind::Less) {
+            self.skip_balanced_angle_list()?;
+        }
 
         let extends = if self.at_keyword(Keyword::Extends) {
             self.bump();
             self.expect(TokenKind::Ident, "expected parent class name")?;
-            Some(self.previous().lexeme.clone())
+            let extends = self.previous().lexeme.clone();
+            if self.at(TokenKind::Less) {
+                self.skip_balanced_angle_list()?;
+            }
+            Some(extends)
         } else {
             None
         };
+        if self.matches_contextual_ident("implements") {
+            self.skip_type_until(&[TokenKind::LeftBrace]);
+        }
 
-        let body = self.parse_block()?;
+        self.expect(TokenKind::LeftBrace, "expected class body")?;
+        let mut members = Vec::new();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            if self.matches(TokenKind::Semicolon) {
+                continue;
+            }
+            if let Some(member) = self.parse_class_member()? {
+                members.push(member);
+            }
+        }
+        let body_end = self
+            .expect(TokenKind::RightBrace, "expected `}` after class body")?
+            .span;
         let span = Span {
             start: start.start,
-            end: body.span.end,
+            end: body_end.end,
             line: start.line,
             column: start.column,
         };
-
         Ok(ClassDecl {
             name,
             extends,
-            body: body.body,
+            members,
+            decorators,
             span,
         })
+    }
+
+    fn parse_class_member(&mut self) -> Result<Option<ClassMember>, NoriError> {
+        while self.at(TokenKind::At) {
+            self.parse_decorator()?;
+        }
+        let start = self.peek().span;
+        let modifiers = self.parse_class_member_modifiers();
+
+        if modifiers.is_static
+            && self.at(TokenKind::LeftBrace)
+            && !modifiers.is_async
+            && !modifiers.is_get
+            && !modifiers.is_set
+        {
+            let body = self.parse_block()?;
+            let span = join_span(start, body.span);
+            return Ok(Some(ClassMember::StaticBlock(ClassStaticBlock {
+                body,
+                span,
+            })));
+        }
+
+        let (name, computed, is_private) = self.parse_class_member_name()?;
+
+        if self.at(TokenKind::Less) {
+            self.skip_balanced_angle_list()?;
+        }
+
+        if self.matches(TokenKind::LeftParen) {
+            let params = self.parse_class_params(name == "constructor")?;
+            self.expect(TokenKind::RightParen, "expected `)` after class parameters")?;
+            if self.matches(TokenKind::Colon) {
+                self.skip_type_until(&[TokenKind::LeftBrace, TokenKind::Semicolon]);
+            }
+            if !self.at(TokenKind::LeftBrace) {
+                self.consume_optional_semicolon();
+                return Ok(None);
+            }
+            if modifiers.declaration_only {
+                self.skip_balanced(TokenKind::LeftBrace, TokenKind::RightBrace)?;
+                return Ok(None);
+            }
+
+            let body = self.parse_function_body()?;
+            let span = join_span(start, body.span);
+
+            if name == "constructor" {
+                return Ok(Some(ClassMember::Constructor(ClassConstructor {
+                    params,
+                    body,
+                    span,
+                })));
+            }
+
+            if modifiers.is_get || modifiers.is_set {
+                return Ok(Some(ClassMember::Accessor(ClassAccessor {
+                    name,
+                    params,
+                    body,
+                    is_static: modifiers.is_static,
+                    is_get: modifiers.is_get,
+                    is_private,
+                    computed,
+                    span,
+                })));
+            }
+
+            return Ok(Some(ClassMember::Method(ClassMethod {
+                name,
+                params,
+                body,
+                is_static: modifiers.is_static,
+                is_async: modifiers.is_async,
+                is_get: false,
+                is_set: false,
+                is_private,
+                computed,
+                span,
+            })));
+        }
+
+        let optional = self.matches(TokenKind::Question);
+        let definite = self.matches(TokenKind::Bang);
+        let typed = if self.matches(TokenKind::Colon) {
+            self.skip_type_until(&[TokenKind::Eq, TokenKind::Semicolon, TokenKind::RightBrace]);
+            true
+        } else {
+            false
+        };
+        let value = if self.matches(TokenKind::Eq) {
+            Some(self.parse_expression_until(&[TokenKind::Semicolon, TokenKind::RightBrace])?)
+        } else {
+            None
+        };
+        self.consume_optional_semicolon();
+
+        if modifiers.declaration_only || (value.is_none() && (typed || optional || definite)) {
+            return Ok(None);
+        }
+        let end = value
+            .as_ref()
+            .map_or(self.previous().span, |expr| expr.span);
+        Ok(Some(ClassMember::Field(ClassField {
+            name,
+            value,
+            is_static: modifiers.is_static,
+            is_private,
+            computed,
+            span: join_span(start, end),
+        })))
+    }
+
+    fn parse_class_member_modifiers(&mut self) -> ClassMemberModifiers {
+        let mut modifiers = ClassMemberModifiers::default();
+        loop {
+            if self.matches_contextual_ident("static") {
+                modifiers.is_static = true;
+            } else if self.matches_keyword(Keyword::Async) {
+                modifiers.is_async = true;
+            } else if self.matches_contextual_ident("get") {
+                modifiers.is_get = true;
+            } else if self.matches_contextual_ident("set") {
+                modifiers.is_set = true;
+            } else if self.at_any_contextual_ident(&["abstract", "declare"]) {
+                self.bump();
+                modifiers.declaration_only = true;
+            } else if self.at_any_contextual_ident(&[
+                "public",
+                "private",
+                "protected",
+                "readonly",
+                "override",
+            ]) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        modifiers
+    }
+
+    fn parse_decorator(&mut self) -> Result<Decorator, NoriError> {
+        let start = self.bump().span;
+        let name = self
+            .expect(TokenKind::Ident, "expected decorator name")?
+            .lexeme;
+        let args = if self.at(TokenKind::LeftParen) {
+            self.bump();
+            let mut args = Vec::new();
+            while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
+                args.push(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?);
+                if !self.matches(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(
+                TokenKind::RightParen,
+                "expected `)` after decorator arguments",
+            )?;
+            Some(args)
+        } else {
+            None
+        };
+        let span = Span {
+            start: start.start,
+            end: self.previous().span.end,
+            line: start.line,
+            column: start.column,
+        };
+        Ok(Decorator { name, args, span })
+    }
+
+    fn parse_class_member_name(&mut self) -> Result<(String, Option<Box<Expr>>, bool), NoriError> {
+        let is_private = self.matches(TokenKind::Hash);
+
+        if self.at(TokenKind::LeftBracket) {
+            self.bump();
+            let expr = self.parse_expression_until(&[TokenKind::RightBracket])?;
+            self.expect(TokenKind::RightBracket, "expected `]` after computed name")?;
+            Ok((String::new(), Some(Box::new(expr)), is_private))
+        } else {
+            let name = self
+                .expect(TokenKind::Ident, "expected class member name")?
+                .lexeme;
+            Ok((name, None, is_private))
+        }
     }
 
     fn parse_function(&mut self) -> Result<FunctionDecl, NoriError> {
@@ -189,6 +564,7 @@ impl Parser {
         let start = self.bump().span;
         let async_token = Some(start);
         self.expect_keyword(Keyword::Function, "expected `function`")?;
+        let generator = self.matches(TokenKind::Star);
         let name = if self.at(TokenKind::Ident) {
             Some(self.bump().lexeme)
         } else {
@@ -221,6 +597,7 @@ impl Parser {
             params,
             body,
             async_token,
+            generator,
             decorators: Vec::new(),
             span,
         }))
@@ -269,49 +646,227 @@ impl Parser {
         let for_start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `for`")?;
 
-        let var_kind = if self.at_keyword(Keyword::Const) {
-            self.bump();
-            VarKind::Const
-        } else if self.at_keyword(Keyword::Let) {
-            self.bump();
-            VarKind::Let
-        } else if self.at_keyword(Keyword::Var) {
-            self.bump();
-            VarKind::Var
+        let init = if self.matches(TokenKind::Semicolon) {
+            None
+        } else if self.at_any_keyword(&[Keyword::Const, Keyword::Let, Keyword::Var]) {
+            let var = self.parse_var()?;
+            if self.at_keyword(Keyword::Of) || self.at_keyword(Keyword::In) {
+                return self.finish_for_each(for_start, var);
+            }
+            Some(ForInit::Var(var))
         } else {
-            return Err(self.error_here("expected variable keyword in for loop"));
+            let expr = self.parse_expression_until(&[TokenKind::Semicolon])?;
+            self.expect(TokenKind::Semicolon, "expected `;` after for initializer")?;
+            Some(ForInit::Expr(expr))
         };
 
-        self.expect(TokenKind::Ident, "expected variable name in for loop")?;
-        let name = self.previous().lexeme.clone();
+        let condition = if self.matches(TokenKind::Semicolon) {
+            None
+        } else {
+            let expr = self.parse_expression_until(&[TokenKind::Semicolon])?;
+            self.expect(TokenKind::Semicolon, "expected `;` after for condition")?;
+            Some(expr)
+        };
+        let update = if self.at(TokenKind::RightParen) {
+            None
+        } else {
+            Some(self.parse_expression_until(&[TokenKind::RightParen])?)
+        };
+        self.expect(TokenKind::RightParen, "expected `)` after for clauses")?;
+        let body = Box::new(self.parse_loop_body()?);
+        let end = stmt_span(&body);
 
-        let is_of = if self.at_keyword(Keyword::Of) {
-            self.bump();
+        Ok(Stmt::ClassicFor(Box::new(ClassicForStmt {
+            init,
+            condition,
+            update,
+            body,
+            span: join_span(for_start, end),
+        })))
+    }
+
+    fn finish_for_each(&mut self, start: Span, var: VarDecl) -> Result<Stmt, NoriError> {
+        let declarator = var
+            .declarators
+            .first()
+            .filter(|_| var.declarators.len() == 1)
+            .ok_or_else(|| self.error_here("expected one binding in for loop"))?;
+        if declarator.pattern.is_some() || declarator.init.is_some() {
+            return Err(self.error_here("expected a simple binding in for loop"));
+        }
+        let is_of = if self.matches_keyword(Keyword::Of) {
             true
-        } else if self.at_keyword(Keyword::In) {
-            self.bump();
-            false
         } else {
-            return Err(self.error_here("expected `in` or `of` in for loop"));
+            self.expect_keyword(Keyword::In, "expected `in` or `of` in for loop")?;
+            false
         };
-        let iterable = self.parse_expression_until_statement_end()?;
-
+        let iterable = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after for loop")?;
-        let body = self.parse_block()?;
-        let body_span = body.span;
+        let body = Box::new(self.parse_loop_body()?);
+        let end = stmt_span(&body);
 
         Ok(Stmt::For(ForStmt {
-            variable: var_kind,
-            name,
+            variable: var.kind,
+            name: declarator.name.clone(),
             iterable,
             is_of,
             body,
-            span: Span {
-                start: for_start.start,
-                end: body_span.end,
-                line: for_start.line,
-                column: for_start.column,
-            },
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_for_await(&mut self, for_span: Span) -> Result<Stmt, NoriError> {
+        self.expect(TokenKind::LeftParen, "expected `(` after `for await`")?;
+        let var = self.parse_var()?;
+        let declarator = var
+            .declarators
+            .first()
+            .filter(|_| var.declarators.len() == 1)
+            .ok_or_else(|| self.error_here("expected one binding in for-await loop"))?;
+        if declarator.pattern.is_some() || declarator.init.is_some() {
+            return Err(self.error_here("expected a simple binding in for-await loop"));
+        }
+        self.expect_keyword(Keyword::Of, "expected `of` in for-await loop")?;
+        let iterable = self.parse_expression_until(&[TokenKind::RightParen])?;
+        self.expect(TokenKind::RightParen, "expected `)` after for-await loop")?;
+        let body = Box::new(self.parse_loop_body()?);
+        let end = stmt_span(&body);
+        Ok(Stmt::For(ForStmt {
+            variable: var.kind,
+            name: declarator.name.clone(),
+            iterable,
+            is_of: true,
+            body,
+            span: join_span(for_span, end),
+        }))
+    }
+
+    fn parse_while(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        self.expect(TokenKind::LeftParen, "expected `(` after `while`")?;
+        let condition = self.parse_expression_until(&[TokenKind::RightParen])?;
+        self.expect(TokenKind::RightParen, "expected `)` after while condition")?;
+        let body = Box::new(self.parse_loop_body()?);
+        let end = stmt_span(&body);
+        Ok(Stmt::While(WhileStmt {
+            condition,
+            body,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_do_while(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        let body = Box::new(self.parse_loop_body()?);
+        self.expect_keyword(Keyword::While, "expected `while` after do body")?;
+        self.expect(TokenKind::LeftParen, "expected `(` after `while`")?;
+        let condition = self.parse_expression_until(&[TokenKind::RightParen])?;
+        self.expect(
+            TokenKind::RightParen,
+            "expected `)` after do-while condition",
+        )?;
+        self.consume_optional_semicolon();
+        Ok(Stmt::DoWhile(DoWhileStmt {
+            body,
+            condition,
+            span: join_span(start, self.previous().span),
+        }))
+    }
+
+    fn parse_loop_body(&mut self) -> Result<Stmt, NoriError> {
+        self.loop_depth += 1;
+        let body = self.parse_stmt();
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+        body
+    }
+
+    fn parse_loop_control(
+        &mut self,
+        name: &str,
+        constructor: fn(Span) -> Stmt,
+    ) -> Result<Stmt, NoriError> {
+        if self.loop_depth == 0 {
+            return Err(self.error_here(&format!("{name} is only valid inside a loop")));
+        }
+        let span = self.bump().span;
+        self.consume_optional_semicolon();
+        Ok(constructor(span))
+    }
+
+    fn parse_switch(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        self.expect(TokenKind::LeftParen, "expected `(` after `switch`")?;
+        let discriminant = self.parse_expression_until(&[TokenKind::RightParen])?;
+        self.expect(TokenKind::RightParen, "expected `)` after switch condition")?;
+        self.expect(TokenKind::LeftBrace, "expected `{` after switch")?;
+        let mut cases = Vec::new();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            let case_start = self.peek().span;
+            let test = if self.matches_keyword(Keyword::Default) {
+                None
+            } else {
+                self.expect_keyword(Keyword::Case, "expected `case` or `default`")?;
+                Some(self.parse_expression_until(&[TokenKind::Colon])?)
+            };
+            self.expect(TokenKind::Colon, "expected `:` after case clause")?;
+            let mut consequent = Vec::new();
+            while !self.at(TokenKind::RightBrace)
+                && !self.at(TokenKind::Eof)
+                && !self.at_keyword(Keyword::Case)
+                && !self.at_keyword(Keyword::Default)
+            {
+                consequent.push(self.parse_stmt()?);
+            }
+            let span = join_span(case_start, self.previous().span);
+            cases.push(nori_ast::SwitchCase {
+                test,
+                consequent,
+                span,
+            });
+        }
+        let end = self
+            .expect(TokenKind::RightBrace, "expected `}` after switch body")?
+            .span;
+        Ok(Stmt::Switch(nori_ast::SwitchStmt {
+            discriminant,
+            cases,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_throw(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        let argument = self.parse_expression_until_statement_end()?;
+        self.consume_optional_semicolon();
+        Ok(Stmt::Throw(nori_ast::ThrowStmt {
+            argument,
+            span: join_span(start, self.previous().span),
+        }))
+    }
+
+    fn parse_with(&mut self) -> Result<Stmt, NoriError> {
+        let start = self.bump().span;
+        self.expect(TokenKind::LeftParen, "expected `(` after `with`")?;
+        let object = self.parse_expression_until(&[TokenKind::RightParen])?;
+        self.expect(TokenKind::RightParen, "expected `)` after with expression")?;
+        let body = Box::new(self.parse_stmt()?);
+        let end = stmt_span(&body);
+        Ok(Stmt::With(nori_ast::WithStmt {
+            object,
+            body,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_label(&mut self) -> Result<Stmt, NoriError> {
+        let label_token = self.bump();
+        self.bump(); // colon
+        let body = Box::new(self.parse_stmt()?);
+        let span = join_span(label_token.span, stmt_span(&body));
+        Ok(Stmt::Label(nori_ast::LabelStmt {
+            label: label_token.lexeme,
+            body,
+            span,
         }))
     }
 
@@ -323,6 +878,7 @@ impl Parser {
             None
         };
         self.expect_keyword(Keyword::Function, "expected `function`")?;
+        let generator = self.matches(TokenKind::Star);
         let name = if self.at(TokenKind::Ident) {
             Some(self.bump().lexeme)
         } else {
@@ -343,7 +899,7 @@ impl Parser {
         if self.matches(TokenKind::Colon) {
             self.skip_type_until(&[TokenKind::LeftBrace]);
         }
-        let body = self.parse_block()?;
+        let body = self.parse_function_body()?;
         let span = Span {
             start: start.start,
             end: body.span.end,
@@ -355,20 +911,35 @@ impl Parser {
             params,
             body,
             async_token,
+            generator,
             decorators: Vec::new(),
             span,
         })
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, NoriError> {
+        self.parse_params_with_properties(false)
+    }
+
+    fn parse_class_params(&mut self, parameter_properties: bool) -> Result<Vec<Param>, NoriError> {
+        self.parse_params_with_properties(parameter_properties)
+    }
+
+    fn parse_params_with_properties(
+        &mut self,
+        parameter_properties: bool,
+    ) -> Result<Vec<Param>, NoriError> {
         let mut params = Vec::new();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
             self.matches(TokenKind::Ellipsis);
+            let is_property =
+                parameter_properties && self.consume_constructor_parameter_property_modifiers();
             let name = if self.at(TokenKind::Ident) {
                 self.bump().lexeme
             } else {
                 return Err(self.error_here("expected parameter name"));
             };
+            self.matches(TokenKind::Question);
             if self.matches(TokenKind::Colon) {
                 self.skip_type_until(&[TokenKind::Comma, TokenKind::Eq, TokenKind::RightParen]);
             }
@@ -377,12 +948,25 @@ impl Parser {
             } else {
                 None
             };
-            params.push(Param { name, default });
+            params.push(Param {
+                name,
+                default,
+                is_property,
+            });
             if !self.matches(TokenKind::Comma) {
                 break;
             }
         }
         Ok(params)
+    }
+
+    fn consume_constructor_parameter_property_modifiers(&mut self) -> bool {
+        let mut is_property = false;
+        while self.at_any_contextual_ident(&["public", "private", "protected", "readonly"]) {
+            self.bump();
+            is_property = true;
+        }
+        is_property
     }
 
     fn parse_block(&mut self) -> Result<BlockStmt, NoriError> {
@@ -398,6 +982,14 @@ impl Parser {
             body,
             span: join_span(start, end),
         })
+    }
+
+    fn parse_function_body(&mut self) -> Result<BlockStmt, NoriError> {
+        let loop_depth = self.loop_depth;
+        self.loop_depth = 0;
+        let body = self.parse_block();
+        self.loop_depth = loop_depth;
+        body
     }
 
     fn parse_var(&mut self) -> Result<VarDecl, NoriError> {
@@ -455,38 +1047,56 @@ impl Parser {
         })
     }
 
-    fn parse_destructuring_pattern(&mut self) -> Result<DestructuringPattern, NoriError> {
+    fn parse_destructuring_pattern(&mut self) -> Result<Pattern, NoriError> {
         let start = self.peek().span;
         if self.at(TokenKind::LeftBracket) {
             self.bump();
-            let mut names = Vec::new();
+            let mut elements = Vec::new();
             while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::Ident) {
-                    names.push(self.bump().lexeme);
+                    elements.push(Some(Pattern::Ident(self.bump().lexeme)));
                 } else if self.at(TokenKind::Comma) {
                     self.bump();
+                    elements.push(None);
                 } else {
                     break;
                 }
             }
             self.expect(TokenKind::RightBracket, "expected `]` after array pattern")?;
             let end = self.previous().span;
-            Ok(DestructuringPattern {
-                kind: DestructuringKind::Array(names, join_span(start, end)),
+            Ok(Pattern::Array {
+                elements,
+                rest: None,
                 span: join_span(start, end),
             })
         } else if self.at(TokenKind::LeftBrace) {
             self.bump();
-            let mut props = Vec::new();
+            let mut properties = Vec::new();
             while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::Ident) {
                     let name = self.bump().lexeme;
-                    let default = if self.matches(TokenKind::Eq) {
-                        Some(self.bump().lexeme)
-                    } else {
-                        None
+                    let default =
+                        if self.matches(TokenKind::Eq) {
+                            Some(self.parse_expression_until(&[
+                                TokenKind::Comma,
+                                TokenKind::RightBrace,
+                            ])?)
+                        } else {
+                            None
+                        };
+                    let span = Span {
+                        start: start.start,
+                        end: self.previous().span.end,
+                        line: start.line,
+                        column: start.column,
                     };
-                    props.push((name, default));
+                    properties.push(nori_ast::ObjectPatternProp {
+                        key: name.clone(),
+                        alias: None,
+                        value: Some(Box::new(Pattern::Ident(name))),
+                        default,
+                        span,
+                    });
                 } else if self.at(TokenKind::Comma) {
                     self.bump();
                 } else {
@@ -495,8 +1105,9 @@ impl Parser {
             }
             self.expect(TokenKind::RightBrace, "expected `}` after object pattern")?;
             let end = self.previous().span;
-            Ok(DestructuringPattern {
-                kind: DestructuringKind::Object(props, join_span(start, end)),
+            Ok(Pattern::Object {
+                properties,
+                rest: None,
                 span: join_span(start, end),
             })
         } else {
@@ -619,6 +1230,16 @@ impl Parser {
                 continue;
             }
 
+            if self.syntax.typescript && self.at_contextual_ident("as") {
+                lhs = self.parse_type_erasure(lhs, TypeErasureKind::As, stop);
+                continue;
+            }
+
+            if self.syntax.typescript && self.at_contextual_ident("satisfies") {
+                lhs = self.parse_type_erasure(lhs, TypeErasureKind::Satisfies, stop);
+                continue;
+            }
+
             if let Some(op) = assignment_op(self.peek().kind) {
                 if min_bp > 1 {
                     break;
@@ -669,12 +1290,15 @@ impl Parser {
             TokenKind::Ident => {
                 if self.at(TokenKind::Arrow) {
                     self.bump();
-                    let body = self.parse_expression_until(stop)?;
-                    let span = join_span(token.span, body.span);
+                    let body = self.parse_arrow_body(stop)?;
+                    let span = match &body {
+                        ArrowBody::Expression(e) => join_span(token.span, e.span),
+                        ArrowBody::Block(b) => join_span(token.span, b.span),
+                    };
                     Expr {
                         kind: ExprKind::Arrow {
                             params: vec![token.lexeme],
-                            body: Box::new(body),
+                            body,
                         },
                         span,
                     }
@@ -705,6 +1329,121 @@ impl Parser {
                 kind: ExprKind::Null,
                 span: token.span,
             },
+            TokenKind::Keyword(Keyword::Super) => Expr {
+                kind: ExprKind::Ident(token.lexeme),
+                span: token.span,
+            },
+            TokenKind::Keyword(Keyword::This) => Expr {
+                kind: ExprKind::This,
+                span: token.span,
+            },
+            TokenKind::Keyword(Keyword::New) => {
+                if self.matches(TokenKind::Dot) {
+                    let prop = self
+                        .expect(TokenKind::Ident, "expected `target` after `new.`")?
+                        .lexeme;
+                    let span = join_span(token.span, self.previous().span);
+                    Expr {
+                        kind: ExprKind::MetaProperty {
+                            meta: "new".to_string(),
+                            property: prop,
+                        },
+                        span,
+                    }
+                } else {
+                    let callee = self.parse_new_callee(stop)?;
+                    self.expect(TokenKind::LeftParen, "expected `(` after `new` callee")?;
+                    let args = self.parse_args()?;
+                    let end = self
+                        .expect(TokenKind::RightParen, "expected `)` after `new` arguments")?
+                        .span;
+                    let span = join_span(token.span, end);
+                    Expr {
+                        kind: ExprKind::New {
+                            callee: Box::new(callee),
+                            args,
+                        },
+                        span,
+                    }
+                }
+            }
+            TokenKind::Keyword(Keyword::Delete) => {
+                let rhs = self.parse_expression_until_bp(stop, 15)?;
+                let span = join_span(token.span, rhs.span);
+                Expr {
+                    kind: ExprKind::Delete(Box::new(rhs)),
+                    span,
+                }
+            }
+            TokenKind::Keyword(Keyword::Void) => {
+                let rhs = self.parse_expression_until_bp(stop, 15)?;
+                let span = join_span(token.span, rhs.span);
+                Expr {
+                    kind: ExprKind::Void(Box::new(rhs)),
+                    span,
+                }
+            }
+            TokenKind::Keyword(Keyword::Typeof) => {
+                let rhs = self.parse_expression_until_bp(stop, 15)?;
+                let span = join_span(token.span, rhs.span);
+                Expr {
+                    kind: ExprKind::Typeof(Box::new(rhs)),
+                    span,
+                }
+            }
+            TokenKind::Keyword(Keyword::Yield) => {
+                if self.loop_depth > 0 {
+                    return Err(self.error_here("`yield` is not allowed inside loops"));
+                }
+                let delegate = self.matches(TokenKind::Star);
+                let value = if self.at_any(stop)
+                    || self.at(TokenKind::Semicolon)
+                    || self.at(TokenKind::RightBrace)
+                    || self.at(TokenKind::RightParen)
+                    || self.at(TokenKind::Comma)
+                    || self.at(TokenKind::Colon)
+                    || self.at(TokenKind::Eq)
+                {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expression_until_bp(stop, 2)?))
+                };
+                let span = join_span(token.span, value.as_ref().map_or(token.span, |v| v.span));
+                Expr {
+                    kind: ExprKind::Yield { value, delegate },
+                    span,
+                }
+            }
+            TokenKind::BigInt => Expr {
+                kind: ExprKind::BigInt(token.lexeme),
+                span: token.span,
+            },
+            TokenKind::Keyword(Keyword::Import) if self.at(TokenKind::Dot) => {
+                self.bump();
+                let prop = self
+                    .expect(TokenKind::Ident, "expected `meta` after `import.`")?
+                    .lexeme;
+                let span = join_span(token.span, self.previous().span);
+                Expr {
+                    kind: ExprKind::MetaProperty {
+                        meta: "import".to_string(),
+                        property: prop,
+                    },
+                    span,
+                }
+            }
+            TokenKind::Keyword(Keyword::Import) if self.at(TokenKind::LeftParen) => {
+                self.bump();
+                let arg = self.parse_expression_until(&[TokenKind::RightParen])?;
+                let end = self
+                    .expect(TokenKind::RightParen, "expected `)` after `import(`")?
+                    .span;
+                let span = join_span(token.span, end);
+                Expr {
+                    kind: ExprKind::Import(Box::new(arg)),
+                    span,
+                }
+            }
             TokenKind::Bang | TokenKind::Minus | TokenKind::Plus => {
                 let rhs = self.parse_expression_until_bp(stop, 15)?;
                 let span = join_span(token.span, rhs.span);
@@ -716,18 +1455,30 @@ impl Parser {
                     span,
                 }
             }
+            TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                let rhs = self.parse_expression_until_bp(stop, 15)?;
+                let span = join_span(token.span, rhs.span);
+                Expr {
+                    kind: ExprKind::Update {
+                        op: token.lexeme,
+                        expr: Box::new(rhs),
+                        prefix: true,
+                    },
+                    span,
+                }
+            }
             TokenKind::LeftParen => {
                 if self.looks_like_arrow_params()? {
                     let params = self.collect_arrow_params()?;
                     self.expect(TokenKind::RightParen, "expected `)` after arrow parameters")?;
                     self.expect(TokenKind::Arrow, "expected `=>` after arrow parameters")?;
-                    let body = self.parse_expression_until(stop)?;
-                    let span = join_span(token.span, body.span);
+                    let body = self.parse_arrow_body(stop)?;
+                    let span = match &body {
+                        ArrowBody::Expression(e) => join_span(token.span, e.span),
+                        ArrowBody::Block(b) => join_span(token.span, b.span),
+                    };
                     Expr {
-                        kind: ExprKind::Arrow {
-                            params,
-                            body: Box::new(body),
-                        },
+                        kind: ExprKind::Arrow { params, body },
                         span,
                     }
                 } else {
@@ -744,6 +1495,13 @@ impl Parser {
                 }
             }
             TokenKind::LeftBracket => self.parse_array(token.span, stop)?,
+            TokenKind::Keyword(Keyword::Class) => {
+                let class = self.parse_class()?;
+                Expr {
+                    kind: ExprKind::Raw,
+                    span: class.span,
+                }
+            }
             TokenKind::LeftBrace => self.parse_object_raw(token.span)?,
             TokenKind::Less if self.syntax.markup => self.parse_markup_after_less(token.span)?,
             TokenKind::Keyword(Keyword::Await) => {
@@ -770,12 +1528,61 @@ impl Parser {
                 break;
             }
             if self.matches(TokenKind::Dot) {
+                let optional = false;
                 let prop = self.expect(TokenKind::Ident, "expected property name after `.`")?;
                 let span = join_span(expr.span, prop.span);
                 expr = Expr {
                     kind: ExprKind::Member {
                         object: Box::new(expr),
                         property: prop.lexeme,
+                        optional,
+                    },
+                    span,
+                };
+                continue;
+            }
+            if self.matches(TokenKind::QuestionDot) {
+                if self.at(TokenKind::LeftBracket) {
+                    self.bump();
+                    let index = self.parse_expression_until(&[TokenKind::RightBracket])?;
+                    let end = self
+                        .expect(TokenKind::RightBracket, "expected `]` after optional index")?
+                        .span;
+                    let span = join_span(expr.span, end);
+                    expr = Expr {
+                        kind: ExprKind::Index {
+                            object: Box::new(expr),
+                            index: Box::new(index),
+                            optional: true,
+                        },
+                        span,
+                    };
+                    continue;
+                }
+                if self.at(TokenKind::LeftParen) {
+                    self.bump();
+                    let args = self.parse_args()?;
+                    let end = self
+                        .expect(TokenKind::RightParen, "expected `)` after optional call")?
+                        .span;
+                    let span = join_span(expr.span, end);
+                    expr = Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(expr),
+                            args,
+                            optional: true,
+                        },
+                        span,
+                    };
+                    continue;
+                }
+                let prop = self.expect(TokenKind::Ident, "expected property name after `?.`")?;
+                let span = join_span(expr.span, prop.span);
+                expr = Expr {
+                    kind: ExprKind::Member {
+                        object: Box::new(expr),
+                        property: prop.lexeme,
+                        optional: true,
                     },
                     span,
                 };
@@ -791,6 +1598,7 @@ impl Parser {
                     kind: ExprKind::Index {
                         object: Box::new(expr),
                         index: Box::new(index),
+                        optional: false,
                     },
                     span,
                 };
@@ -806,12 +1614,92 @@ impl Parser {
                     kind: ExprKind::Call {
                         callee: Box::new(expr),
                         args,
+                        optional: false,
                     },
                     span,
                 };
                 continue;
             }
+            if self.syntax.typescript
+                && allows_call_type_arguments(&expr)
+                && self.looks_like_call_type_arguments()
+            {
+                self.skip_balanced_angle_list()?;
+                continue;
+            }
+            if self.syntax.typescript && self.matches(TokenKind::Bang) {
+                let span = join_span(expr.span, self.previous().span);
+                expr = Expr {
+                    kind: ExprKind::TypeErasure {
+                        kind: TypeErasureKind::NonNull,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                };
+                continue;
+            }
+            if self.at(TokenKind::PlusPlus) || self.at(TokenKind::MinusMinus) {
+                let update = self.bump();
+                let span = join_span(expr.span, update.span);
+                expr = Expr {
+                    kind: ExprKind::Update {
+                        op: update.lexeme,
+                        expr: Box::new(expr),
+                        prefix: false,
+                    },
+                    span,
+                };
+                break;
+            }
             break;
+        }
+        Ok(expr)
+    }
+
+    fn parse_type_erasure(
+        &mut self,
+        expr: Expr,
+        kind: TypeErasureKind,
+        stop: &[TokenKind],
+    ) -> Expr {
+        self.bump();
+        self.skip_type_until_expression_boundary(stop);
+        let span = join_span(expr.span, self.previous().span);
+        Expr {
+            kind: ExprKind::TypeErasure {
+                kind,
+                expr: Box::new(expr),
+            },
+            span,
+        }
+    }
+
+    fn parse_arrow_body(&mut self, stop: &[TokenKind]) -> Result<ArrowBody, NoriError> {
+        if self.at(TokenKind::LeftBrace) {
+            let block = self.parse_block()?;
+            Ok(ArrowBody::Block(block))
+        } else {
+            let expr = self.parse_expression_until(stop)?;
+            Ok(ArrowBody::Expression(Box::new(expr)))
+        }
+    }
+
+    fn parse_new_callee(&mut self, stop: &[TokenKind]) -> Result<Expr, NoriError> {
+        let mut expr = self.parse_prefix(stop)?;
+        loop {
+            if self.at_any(stop)
+                || self.at(TokenKind::Eof)
+                || self.at(TokenKind::LeftParen)
+                || self.at(TokenKind::Semicolon)
+                || self.at(TokenKind::RightBrace)
+            {
+                break;
+            }
+            if self.at(TokenKind::Dot) {
+                expr = self.parse_postfix(expr, stop)?;
+            } else {
+                break;
+            }
         }
         Ok(expr)
     }
@@ -871,10 +1759,90 @@ impl Parser {
     }
 
     fn parse_object_raw(&mut self, start: Span) -> Result<Expr, NoriError> {
-        self.skip_until_matching(TokenKind::LeftBrace, TokenKind::RightBrace)?;
-        let end = self.previous().span;
+        let mut properties = Vec::new();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            if self.matches(TokenKind::Comma) {
+                continue;
+            }
+            if self.at(TokenKind::Ellipsis) {
+                self.bump();
+                let expr =
+                    self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBrace])?;
+                let span = join_span(self.previous().span, expr.span);
+                properties.push(nori_ast::ObjectProperty {
+                    key: nori_ast::PropertyKey::Ident(String::new()),
+                    value: Expr {
+                        kind: ExprKind::Spread {
+                            expr: Box::new(expr),
+                        },
+                        span,
+                    },
+                    kind: nori_ast::PropertyKind::Init,
+                    computed: false,
+                    shorthand: false,
+                    span,
+                });
+                if !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Comma) {
+                    break;
+                }
+                continue;
+            }
+            let prop_start = self.peek().span;
+            let (key, computed, name) = if self.at(TokenKind::LeftBracket) {
+                self.bump();
+                let expr = self.parse_expression_until(&[TokenKind::RightBracket])?;
+                self.expect(TokenKind::RightBracket, "expected `]`")?;
+                (
+                    nori_ast::PropertyKey::Computed(Box::new(expr)),
+                    true,
+                    String::new(),
+                )
+            } else if self.at(TokenKind::String) {
+                let s = self.bump().lexeme;
+                (nori_ast::PropertyKey::String(s.clone()), false, s)
+            } else if self.at(TokenKind::Number) {
+                let n = self.bump().lexeme;
+                (nori_ast::PropertyKey::Number(n.clone()), false, n)
+            } else if self.at(TokenKind::Ident) {
+                let n = self.bump().lexeme;
+                (nori_ast::PropertyKey::Ident(n.clone()), false, n)
+            } else {
+                break;
+            };
+            if self.matches(TokenKind::Colon) {
+                let value =
+                    self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBrace])?;
+                let span = join_span(prop_start, value.span);
+                properties.push(nori_ast::ObjectProperty {
+                    key,
+                    value,
+                    kind: nori_ast::PropertyKind::Init,
+                    computed,
+                    shorthand: false,
+                    span,
+                });
+            } else if name.is_empty() {
+                break;
+            } else {
+                let span = join_span(prop_start, self.previous().span);
+                properties.push(nori_ast::ObjectProperty {
+                    key,
+                    value: Expr {
+                        kind: ExprKind::Ident(name),
+                        span,
+                    },
+                    kind: nori_ast::PropertyKind::Init,
+                    computed,
+                    shorthand: true,
+                    span,
+                });
+            }
+        }
+        let end = self
+            .expect(TokenKind::RightBrace, "expected `}` after object literal")?
+            .span;
         Ok(Expr {
-            kind: ExprKind::Object,
+            kind: ExprKind::Object(properties),
             span: join_span(start, end),
         })
     }
@@ -1156,6 +2124,60 @@ impl Parser {
         }
     }
 
+    fn skip_type_until_expression_boundary(&mut self, stop: &[TokenKind]) {
+        let mut paren = 0usize;
+        let mut bracket = 0usize;
+        let mut brace = 0usize;
+        let mut angle = 0usize;
+        while !self.at(TokenKind::Eof) {
+            let kind = self.peek().kind;
+            if paren == 0
+                && bracket == 0
+                && brace == 0
+                && angle == 0
+                && (stop.contains(&kind) || is_expression_type_boundary(kind))
+            {
+                break;
+            }
+            match kind {
+                TokenKind::LeftParen => paren += 1,
+                TokenKind::RightParen => paren = paren.saturating_sub(1),
+                TokenKind::LeftBracket => bracket += 1,
+                TokenKind::RightBracket => bracket = bracket.saturating_sub(1),
+                TokenKind::LeftBrace => brace += 1,
+                TokenKind::RightBrace => brace = brace.saturating_sub(1),
+                TokenKind::Less => angle += 1,
+                TokenKind::Greater => angle = angle.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
+        }
+    }
+
+    fn looks_like_call_type_arguments(&mut self) -> bool {
+        if !self.at(TokenKind::Less) {
+            return false;
+        }
+
+        let checkpoint = self.input.checkpoint();
+        let mut depth = 0usize;
+        let looks_like_call = loop {
+            match self.bump().kind {
+                TokenKind::Less => depth += 1,
+                TokenKind::Greater => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break self.at(TokenKind::LeftParen);
+                    }
+                }
+                TokenKind::Eof => break false,
+                _ => {}
+            }
+        };
+        self.input.rewind(checkpoint);
+        looks_like_call
+    }
+
     fn skip_balanced_angle_list(&mut self) -> Result<(), NoriError> {
         self.expect(TokenKind::Less, "expected `<`")?;
         let mut depth = 1usize;
@@ -1210,6 +2232,31 @@ impl Parser {
             Ok(self.bump())
         } else {
             Err(self.error_here(message))
+        }
+    }
+
+    fn expect_contextual(&mut self, name: &str, message: &str) -> Result<Token, NoriError> {
+        if self.at_contextual_ident(name) {
+            Ok(self.bump())
+        } else {
+            Err(self.error_here(message))
+        }
+    }
+
+    fn at_contextual_ident(&self, name: &str) -> bool {
+        self.at(TokenKind::Ident) && self.peek().lexeme == name
+    }
+
+    fn at_any_contextual_ident(&self, names: &[&str]) -> bool {
+        names.iter().any(|name| self.at_contextual_ident(name))
+    }
+
+    fn matches_contextual_ident(&mut self, name: &str) -> bool {
+        if self.at_contextual_ident(name) {
+            self.bump();
+            true
+        } else {
+            false
         }
     }
 
@@ -1286,7 +2333,14 @@ impl Parser {
 
 fn stmt_span(stmt: &Stmt) -> Span {
     match stmt {
-        Stmt::Import(raw) | Stmt::TypeOnly(raw) | Stmt::Raw(raw) => raw.span,
+        Stmt::Import(import) => import.span,
+        Stmt::Export(export) => match export {
+            nori_ast::ExportDecl::Named { span, .. } | nori_ast::ExportDecl::All { span, .. } => {
+                *span
+            }
+            nori_ast::ExportDecl::Declaration(stmt) => stmt_span(stmt),
+        },
+        Stmt::TypeOnly(raw) | Stmt::Raw(raw) => raw.span,
         Stmt::Var(var) => var.span,
         Stmt::Function(function) | Stmt::ExportDefaultFunction(function) => function.span,
         Stmt::ExportDefaultExpr(expr) | Stmt::Expr(expr) => expr.span,
@@ -1296,6 +2350,15 @@ fn stmt_span(stmt: &Stmt) -> Span {
         Stmt::Class(class) => class.span,
         Stmt::Try(stmt) => stmt.span,
         Stmt::For(stmt) => stmt.span,
+        Stmt::ClassicFor(stmt) => stmt.span,
+        Stmt::While(stmt) => stmt.span,
+        Stmt::DoWhile(stmt) => stmt.span,
+        Stmt::Switch(stmt) => stmt.span,
+        Stmt::Throw(stmt) => stmt.span,
+        Stmt::Label(stmt) => stmt.span,
+        Stmt::Debugger(span) => *span,
+        Stmt::With(stmt) => stmt.span,
+        Stmt::Break(span) | Stmt::Continue(span) => *span,
     }
 }
 
@@ -1314,18 +2377,46 @@ fn assignment_op(kind: TokenKind) -> Option<&'static str> {
         TokenKind::PlusEq => "+=",
         TokenKind::MinusEq => "-=",
         TokenKind::StarEq => "*=",
+        TokenKind::StarStarEq => "**=",
         TokenKind::SlashEq => "/=",
+        TokenKind::AndAndEq => "&&=",
+        TokenKind::OrOrEq => "||=",
+        TokenKind::QuestionQuestionEq => "??=",
+        TokenKind::PipeEq => "|=",
+        TokenKind::AmpersandEq => "&=",
+        TokenKind::CaretEq => "^=",
+        TokenKind::ShiftLeftEq => "<<=",
+        TokenKind::ShiftRightEq => ">>=",
+        TokenKind::ShiftRightUnsignedEq => ">>>=",
         _ => return None,
     })
 }
 
 fn infix_binding_power(kind: TokenKind) -> Option<(u8, u8, &'static str)> {
+    match kind {
+        TokenKind::Keyword(Keyword::In) => return Some((9, 10, "in")),
+        TokenKind::Keyword(Keyword::Instanceof) => return Some((9, 10, "instanceof")),
+        _ => {}
+    }
     Some(match kind {
         TokenKind::OrOr => (3, 4, "||"),
+        TokenKind::QuestionQuestion => (3, 4, "??"),
         TokenKind::AndAnd => (5, 6, "&&"),
+        TokenKind::Pipe => (5, 6, "|"),
+        TokenKind::Caret => (6, 7, "^"),
+        TokenKind::Ampersand => (7, 8, "&"),
         TokenKind::EqEq | TokenKind::BangEq => {
             (7, 8, if kind == TokenKind::EqEq { "==" } else { "!=" })
         }
+        TokenKind::EqEqEq | TokenKind::BangEqEq => (
+            7,
+            8,
+            if kind == TokenKind::EqEqEq {
+                "==="
+            } else {
+                "!=="
+            },
+        ),
         TokenKind::Less | TokenKind::LessEq | TokenKind::Greater | TokenKind::GreaterEq => {
             let op = match kind {
                 TokenKind::Less => "<",
@@ -1335,6 +2426,15 @@ fn infix_binding_power(kind: TokenKind) -> Option<(u8, u8, &'static str)> {
                 _ => unreachable!(),
             };
             (9, 10, op)
+        }
+        TokenKind::ShiftLeft | TokenKind::ShiftRight | TokenKind::ShiftRightUnsigned => {
+            let op = match kind {
+                TokenKind::ShiftLeft => "<<",
+                TokenKind::ShiftRight => ">>",
+                TokenKind::ShiftRightUnsigned => ">>>",
+                _ => unreachable!(),
+            };
+            (10, 11, op)
         }
         TokenKind::Plus | TokenKind::Minus => {
             (11, 12, if kind == TokenKind::Plus { "+" } else { "-" })
@@ -1348,6 +2448,43 @@ fn infix_binding_power(kind: TokenKind) -> Option<(u8, u8, &'static str)> {
             };
             (13, 14, op)
         }
+        TokenKind::StarStar => (15, 14, "**"),
         _ => return None,
     })
+}
+
+fn allows_call_type_arguments(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. }
+    )
+}
+
+fn is_expression_type_boundary(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Comma
+            | TokenKind::Semicolon
+            | TokenKind::Question
+            | TokenKind::Plus
+            | TokenKind::PlusPlus
+            | TokenKind::Minus
+            | TokenKind::MinusMinus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::Bang
+            | TokenKind::Eq
+            | TokenKind::EqEq
+            | TokenKind::BangEq
+            | TokenKind::LessEq
+            | TokenKind::GreaterEq
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::Arrow
+    )
 }

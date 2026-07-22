@@ -1,6 +1,6 @@
 use nori::{
     CompileOptions, analyze_source, compile_source,
-    lexer::lex,
+    lexer::{LexContext, TokenKind, lex, lex_with_context},
     parse_source,
     parser::{Parser, Syntax},
 };
@@ -41,6 +41,168 @@ fn lexer_tracks_markup_text_and_spans() {
     assert!(tokens.iter().any(|token| token.lexeme == "Click"));
     assert_eq!(tokens[0].span.line, 1);
     assert_eq!(tokens[0].span.column, 1);
+}
+
+#[test]
+fn lexer_handles_new_keywords() {
+    let source = "new this super delete void typeof instanceof";
+    let tokens = lex(source).unwrap();
+    let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::New)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::This)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Super)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Delete)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Void)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Typeof)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Instanceof)));
+}
+
+#[test]
+fn lexer_handles_statement_keywords() {
+    let source = "switch case throw debugger with";
+    let tokens = lex(source).unwrap();
+    let kinds: Vec<_> = tokens.iter().map(|t| t.kind).collect();
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Switch)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Case)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Throw)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::Debugger)));
+    assert!(kinds.contains(&TokenKind::Keyword(nori::lexer::Keyword::With)));
+}
+
+#[test]
+fn lexer_handles_eqeqeq_and_bangeqeq() {
+    let tokens = lex("=== !==").unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::EqEqEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::BangEqEq));
+}
+
+#[test]
+fn lexer_handles_optional_chaining_and_nullish() {
+    let tokens = lex("?. ?? ??=").unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::QuestionDot));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::QuestionQuestion));
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::QuestionQuestionEq)
+    );
+}
+
+#[test]
+fn lexer_handles_shift_operators() {
+    let tokens = lex("<< <<= >> >>= >>> >>>=").unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::ShiftLeft));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::ShiftLeftEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::ShiftRight));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::ShiftRightEq));
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::ShiftRightUnsigned)
+    );
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::ShiftRightUnsignedEq)
+    );
+}
+
+#[test]
+fn lexer_handles_bitwise_operators() {
+    let tokens = lex("~ ^ ^= & &= &&= | |= ||=").unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Tilde));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Caret));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::CaretEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Ampersand));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::AmpersandEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::AndAndEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Pipe));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::PipeEq));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::OrOrEq));
+}
+
+#[test]
+fn lexer_handles_exponentiation() {
+    let tokens = lex("** **=").unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::StarStar));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::StarStarEq));
+}
+
+#[test]
+fn lexer_handles_bigint() {
+    let tokens = lex("42n 0n 1_000n").unwrap();
+    let bigints: Vec<_> = tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::BigInt)
+        .collect();
+    assert_eq!(bigints.len(), 3);
+}
+
+#[test]
+fn lexer_handles_numeric_separators() {
+    let tokens = lex("1_000 1_000.5_5").unwrap();
+    assert!(tokens.iter().any(|t| t.lexeme == "1_000"));
+    assert!(tokens.iter().any(|t| t.lexeme.contains("1_000.5_5")));
+}
+
+#[test]
+fn lexer_skips_shebang() {
+    let tokens = lex("#!/usr/bin/env node\nconst x = 1;").unwrap();
+    assert!(tokens.iter().any(|t| t.lexeme == "const"));
+    assert!(!tokens.iter().any(|t| t.lexeme.contains("#!/usr")));
+}
+
+#[test]
+fn lexer_parses_regex_literals_with_context() {
+    let tokens = lex_with_context("/foo/g /bar/i", LexContext::ExpectRegex).unwrap();
+    let regexps: Vec<_> = tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::RegExp)
+        .collect();
+    assert_eq!(regexps.len(), 2);
+    assert_eq!(regexps[0].lexeme, "/foo/g");
+    assert_eq!(regexps[1].lexeme, "/bar/i");
+}
+
+#[test]
+fn lexer_does_not_parse_regex_in_normal_context() {
+    let tokens = lex("/foo/g").unwrap();
+    assert!(!tokens.iter().any(|t| t.kind == TokenKind::RegExp));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Slash));
+}
+
+#[test]
+fn lexer_handles_regex_with_escaped_slash() {
+    let tokens = lex_with_context(r"/foo\/bar/g", LexContext::ExpectRegex).unwrap();
+    let regexp = tokens.iter().find(|t| t.kind == TokenKind::RegExp).unwrap();
+    assert_eq!(regexp.lexeme, r"/foo\/bar/g");
+}
+
+#[test]
+fn lexer_handles_regex_character_class() {
+    let tokens = lex_with_context(r"/[a-z]/g", LexContext::ExpectRegex).unwrap();
+    let regexp = tokens.iter().find(|t| t.kind == TokenKind::RegExp).unwrap();
+    assert_eq!(regexp.lexeme, r"/[a-z]/g");
+}
+
+#[test]
+fn lexer_handles_regex_in_binary_expression() {
+    let source = "x /y/g";
+    let tokens = lex(source).unwrap();
+    assert!(tokens.iter().any(|t| t.lexeme == "x"));
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::Slash));
+}
+
+#[test]
+fn lexer_slash_eq_not_affected_by_regex_context() {
+    let tokens = lex_with_context("/=", LexContext::ExpectRegex).unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::SlashEq));
+}
+
+#[test]
+fn lexer_slash_greater_not_affected_by_regex_context() {
+    let tokens = lex_with_context("/>", LexContext::ExpectRegex).unwrap();
+    assert!(tokens.iter().any(|t| t.kind == TokenKind::SlashGreater));
 }
 
 #[test]
@@ -139,6 +301,54 @@ export default function Counter() {
     assert!(analysis.value_reads.contains("doubled"));
     assert!(analysis.value_writes.contains("count"));
     assert!(!analysis.value_writes.contains("doubled"));
+}
+
+#[test]
+fn analyzer_tracks_reactive_value_updates_as_reads_and_writes() {
+    let source = r#"
+const count = $state(0);
+count.value++;
+--count.value;
+"#;
+    let analysis = analyze_source(source, "inline.nori").unwrap();
+
+    assert!(analysis.value_reads.contains("count"));
+    assert!(analysis.value_writes.contains("count"));
+}
+
+#[test]
+fn analyzer_tracks_reactive_bindings_through_erased_typescript_expressions() {
+    let source = r#"
+type Signal<T> = { value: T };
+const count = $state<number>(0) as Signal<number>;
+const doubled = $derived<number>(count!.value as number);
+count!.value += 1;
+"#;
+    let analysis = analyze_source(source, "inline.nori").unwrap();
+
+    assert!(analysis.signals.contains("count"));
+    assert!(analysis.computeds.contains("doubled"));
+    assert!(analysis.value_reads.contains("count"));
+    assert!(analysis.value_writes.contains("count"));
+}
+
+#[test]
+fn analyzer_walks_runtime_class_members() {
+    let source = r#"
+const count = $state(0);
+class Counter {
+  doubled = $derived(count.value * 2);
+
+  bump(step: number): void {
+    count.value += step;
+  }
+}
+"#;
+    let analysis = analyze_source(source, "inline.nori").unwrap();
+
+    assert!(analysis.runtime_symbols.contains("computed"));
+    assert!(analysis.value_reads.contains("count"));
+    assert!(analysis.value_writes.contains("count"));
 }
 
 #[test]
@@ -400,6 +610,33 @@ export default function List() {
 }
 
 #[test]
+fn codegen_erases_typescript_expression_suffixes_and_generic_calls() {
+    let source = r#"
+type Signal<T> = { value: T };
+const count = $state<number>(0) as Signal<number>;
+const stable = count!.value satisfies number;
+const label = count!.value.toString();
+export default function Counter() {
+  return <p>{label} {count!.value}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("const count = signal(0);"));
+    assert!(output.code.contains("const stable = count.value;"));
+    assert!(
+        output
+            .code
+            .contains("const label = count.value.toString();")
+    );
+    assert!(output.code.contains("<p>{label} {count.value}</p>"));
+    assert!(!output.code.contains("$state<number>"));
+    assert!(!output.code.contains(" as Signal"));
+    assert!(!output.code.contains(" satisfies "));
+    assert!(!output.code.contains("count!"));
+}
+
+#[test]
 fn codegen_handles_no_runtime_import_when_none_needed() {
     let source = r#"
 const greeting = "Hello";
@@ -440,39 +677,36 @@ export default function Counter() {
 }
 
 #[test]
-fn unsupported_decorator_produces_diagnostic() {
+fn decorators_are_parsed_and_stripped() {
     let source = include_str!("fixtures/unsupported/Decorator.nori");
-    let error = compile_source(
+    let output = compile_source(
         source,
         CompileOptions {
             filename: "Decorator.nori".to_string(),
             ..CompileOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(
-        error.to_string().contains("decorators are not supported"),
-        "{error}"
-    );
+    assert!(output.code.contains("class Controller {"));
+    assert!(output.code.contains("method()"));
+    assert!(!output.code.contains("@decorator"));
 }
 
 #[test]
-fn unsupported_yield_produces_diagnostic() {
+fn yield_expression_is_supported() {
     let source = include_str!("fixtures/unsupported/Yield.nori");
-    let error = compile_source(
+    let output = compile_source(
         source,
         CompileOptions {
             filename: "Yield.nori".to_string(),
             ..CompileOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(
-        error.to_string().contains("`yield` is not supported"),
-        "{error}"
-    );
+    assert!(output.code.contains("yield 1"));
+    assert!(output.code.contains("function gen()"));
 }
 
 #[test]
@@ -491,6 +725,78 @@ export default function App() {
     assert!(output.code.contains("class Point extends Base {"));
     assert!(output.code.contains("x = 1"));
     assert!(output.code.contains("y = 2"));
+}
+
+#[test]
+fn typescript_class_members_emit_runtime_javascript() {
+    let source = r#"
+interface Named { name: string };
+abstract class Store<T> extends Base<T> implements Named, Iterable<T> {
+  declare omitted: string;
+  abstract describe(value: T): string;
+  public required!: string;
+  protected typed: number;
+  private readonly version: number = 1;
+  plain;
+  static label: string = "store";
+
+  constructor(public id: number, private readonly title: string) {
+    super(id);
+    this.version += id;
+  }
+
+  override rename(value: string): void {
+    this.title = value;
+  }
+
+  async load<U>(value: U): Promise<U> {
+    return value;
+  }
+
+  read(value: T): T;
+  read(value: T): T {
+    return value;
+  }
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("class Store extends Base {"));
+    assert!(output.code.contains("version = 1;"));
+    assert!(output.code.contains("plain;"));
+    assert!(output.code.contains("static label = \"store\";"));
+    assert!(output.code.contains("rename(value)"));
+    assert!(output.code.contains("async load(value)"));
+    assert!(output.code.contains("read(value)"));
+    assert!(!output.code.contains("implements"));
+    assert!(!output.code.contains("abstract"));
+    assert!(!output.code.contains("declare"));
+    assert!(!output.code.contains("omitted"));
+    assert!(!output.code.contains("required"));
+    assert!(!output.code.contains("typed;"));
+    assert!(!output.code.contains(": number"));
+
+    let super_index = output.code.find("super(id);").unwrap();
+    let id_assignment = output.code.find("this.id = id;").unwrap();
+    let title_assignment = output.code.find("this.title = title;").unwrap();
+    assert!(super_index < id_assignment);
+    assert!(id_assignment < title_assignment);
+}
+
+#[test]
+fn constructor_parameter_properties_precede_base_constructor_body() {
+    let source = r#"
+class Task {
+  constructor(public id: number) {
+    log(id);
+  }
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    let assignment = output.code.find("this.id = id;").unwrap();
+    let body_call = output.code.find("log(id);").unwrap();
+    assert!(assignment < body_call);
 }
 
 #[test]
@@ -561,6 +867,130 @@ export default function App() {
 
     assert!(output.code.contains("for (const key in obj)"));
     assert!(output.code.contains("console.log(key)"));
+}
+
+#[test]
+fn while_loop_with_break_is_supported() {
+    let source = r#"
+export default function App() {
+  let index = 0;
+  while (index < 4) {
+    if (index == 2) {
+      break;
+    }
+    index++;
+  }
+  return <p>{index}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("while (index < 4)"));
+    assert!(output.code.contains("break;"));
+    assert!(output.code.contains("index++;"));
+}
+
+#[test]
+fn do_while_loop_with_continue_is_supported() {
+    let source = r#"
+export default function App() {
+  let index = 0;
+  do {
+    index++;
+    if (index < 2) {
+      continue;
+    }
+  } while (index < 4);
+  return <p>{index}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("do {"));
+    assert!(output.code.contains("continue;"));
+    assert!(output.code.contains("} while (index < 4);"));
+}
+
+#[test]
+fn classic_for_loop_with_update_is_supported() {
+    let source = r#"
+export default function App() {
+  let total = 0;
+  for (let index = 0; index < limit; index++) {
+    total += index;
+  }
+  return <p>{total}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(
+        output
+            .code
+            .contains("for (let index = 0; index < limit; index++)")
+    );
+    assert!(output.code.contains("total += index;"));
+}
+
+#[test]
+fn classic_for_loop_allows_empty_clauses() {
+    let source = r#"
+export default function App() {
+  for (;;) {
+    break;
+  }
+  return <p>Done</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("for (; ; )"));
+    assert!(output.code.contains("break;"));
+}
+
+#[test]
+fn prefix_and_postfix_updates_are_preserved() {
+    let source = r#"
+export default function App() {
+  let index = 0;
+  ++index;
+  index--;
+  return <p>{index}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(output.code.contains("++index;"));
+    assert!(output.code.contains("index--;"));
+}
+
+#[test]
+fn break_outside_loop_produces_diagnostic() {
+    let error = compile_source("break;", CompileOptions::default()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("`break` is only valid inside a loop"),
+        "{error}"
+    );
+}
+
+#[test]
+fn continue_outside_loop_produces_diagnostic() {
+    let source = r#"
+export default function App() {
+  continue;
+}
+"#;
+    let error = compile_source(source, CompileOptions::default()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("`continue` is only valid inside a loop"),
+        "{error}"
+    );
 }
 
 #[test]

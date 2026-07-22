@@ -25,6 +25,10 @@ pub enum Keyword {
     Catch,
     Finally,
     For,
+    While,
+    Do,
+    Break,
+    Continue,
     In,
     Of,
     Yield,
@@ -37,14 +41,28 @@ pub enum Keyword {
     True,
     False,
     Null,
+    New,
+    This,
+    Super,
+    Delete,
+    Void,
+    Typeof,
+    Instanceof,
+    Switch,
+    Case,
+    Throw,
+    Debugger,
+    With,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Ident,
     Number,
+    BigInt,
     String,
     MarkupText,
+    RegExp,
     Keyword(Keyword),
     LeftParen,
     RightParen,
@@ -62,17 +80,30 @@ pub enum TokenKind {
     Colon,
     Semicolon,
     Question,
+    QuestionDot,
+    QuestionQuestion,
+    QuestionQuestionEq,
     Plus,
+    PlusPlus,
     Minus,
+    MinusMinus,
     Star,
+    StarStar,
+    StarStarEq,
     Percent,
     Bang,
+    BangEq,
+    BangEqEq,
     At,
     Dollar,
     BackTick,
+    Hash,
+    Tilde,
+    Caret,
+    CaretEq,
     Eq,
     EqEq,
-    BangEq,
+    EqEqEq,
     LessEq,
     GreaterEq,
     PlusEq,
@@ -80,9 +111,19 @@ pub enum TokenKind {
     StarEq,
     SlashEq,
     AndAnd,
-    OrOr,
-    Pipe,
+    AndAndEq,
     Ampersand,
+    AmpersandEq,
+    OrOr,
+    OrOrEq,
+    Pipe,
+    PipeEq,
+    ShiftLeft,
+    ShiftLeftEq,
+    ShiftRight,
+    ShiftRightEq,
+    ShiftRightUnsigned,
+    ShiftRightUnsignedEq,
     Arrow,
     DotDot,
     Ellipsis,
@@ -97,8 +138,18 @@ enum Mode {
     MarkupExpr { return_to_tag: bool, depth: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexContext {
+    Normal,
+    ExpectRegex,
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, NoriError> {
-    Lexer::new(source).lex()
+    Lexer::new(source, LexContext::Normal).lex()
+}
+
+pub fn lex_with_context(source: &str, context: LexContext) -> Result<Vec<Token>, NoriError> {
+    Lexer::new(source, context).lex()
 }
 
 struct Lexer<'a> {
@@ -109,10 +160,11 @@ struct Lexer<'a> {
     mode: Mode,
     markup_depth: usize,
     pending_closing_tag: bool,
+    context: LexContext,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, context: LexContext) -> Self {
         Self {
             source,
             pos: 0,
@@ -121,10 +173,16 @@ impl<'a> Lexer<'a> {
             mode: Mode::Normal,
             markup_depth: 0,
             pending_closing_tag: false,
+            context,
         }
     }
 
     fn lex(mut self) -> Result<Vec<Token>, NoriError> {
+        if self.source.starts_with("#!") {
+            while !matches!(self.peek(), None | Some('\n')) {
+                self.advance();
+            }
+        }
         let mut tokens = Vec::new();
         while !self.is_at_end() {
             if matches!(self.mode, Mode::MarkupText) {
@@ -188,8 +246,16 @@ impl<'a> Lexer<'a> {
                 if self.should_start_markup(start) {
                     self.mode = Mode::MarkupTag;
                     self.pending_closing_tag = self.peek() == Some('/');
+                    TokenKind::Less
+                } else if self.matches('<') {
+                    if self.matches('=') {
+                        TokenKind::ShiftLeftEq
+                    } else {
+                        TokenKind::ShiftLeft
+                    }
+                } else {
+                    TokenKind::Less
                 }
-                TokenKind::Less
             }
             '>' => {
                 if matches!(self.mode, Mode::MarkupTag) {
@@ -204,8 +270,22 @@ impl<'a> Lexer<'a> {
                     } else {
                         Mode::MarkupText
                     };
+                    TokenKind::Greater
+                } else if self.matches('>') {
+                    if self.matches('>') {
+                        if self.matches('=') {
+                            TokenKind::ShiftRightUnsignedEq
+                        } else {
+                            TokenKind::ShiftRightUnsigned
+                        }
+                    } else if self.matches('=') {
+                        TokenKind::ShiftRightEq
+                    } else {
+                        TokenKind::ShiftRight
+                    }
+                } else {
+                    TokenKind::Greater
                 }
-                TokenKind::Greater
             }
             '/' => {
                 if self.matches('>') {
@@ -220,6 +300,13 @@ impl<'a> Lexer<'a> {
                     TokenKind::SlashGreater
                 } else if self.matches('=') {
                     TokenKind::SlashEq
+                } else if self.context == LexContext::ExpectRegex
+                    && !matches!(
+                        self.mode,
+                        Mode::MarkupTag | Mode::MarkupText | Mode::MarkupExpr { .. }
+                    )
+                {
+                    return self.lex_regex(start);
                 } else {
                     TokenKind::Slash
                 }
@@ -238,29 +325,59 @@ impl<'a> Lexer<'a> {
             ',' => TokenKind::Comma,
             ':' => TokenKind::Colon,
             ';' => TokenKind::Semicolon,
-            '?' => TokenKind::Question,
+            '?' => {
+                if self.matches('?') {
+                    if self.matches('=') {
+                        TokenKind::QuestionQuestionEq
+                    } else {
+                        TokenKind::QuestionQuestion
+                    }
+                } else if self.matches('.') {
+                    TokenKind::QuestionDot
+                } else {
+                    TokenKind::Question
+                }
+            }
             '+' => {
-                if self.matches('=') {
+                if self.matches('+') {
+                    TokenKind::PlusPlus
+                } else if self.matches('=') {
                     TokenKind::PlusEq
                 } else {
                     TokenKind::Plus
                 }
             }
             '-' => {
-                if self.matches('=') {
+                if self.matches('-') {
+                    TokenKind::MinusMinus
+                } else if self.matches('=') {
                     TokenKind::MinusEq
                 } else {
                     TokenKind::Minus
                 }
             }
             '*' => {
-                if self.matches('=') {
+                if self.matches('*') {
+                    if self.matches('=') {
+                        TokenKind::StarStarEq
+                    } else {
+                        TokenKind::StarStar
+                    }
+                } else if self.matches('=') {
                     TokenKind::StarEq
                 } else {
                     TokenKind::Star
                 }
             }
             '%' => TokenKind::Percent,
+            '~' => TokenKind::Tilde,
+            '^' => {
+                if self.matches('=') {
+                    TokenKind::CaretEq
+                } else {
+                    TokenKind::Caret
+                }
+            }
             '$' => {
                 if let Some(next) = self.peek() {
                     if next.is_ascii_alphabetic() || next == '_' || next == '$' {
@@ -271,26 +388,57 @@ impl<'a> Lexer<'a> {
             }
             '!' => {
                 if self.matches('=') {
-                    TokenKind::BangEq
+                    if self.matches('=') {
+                        TokenKind::BangEqEq
+                    } else {
+                        TokenKind::BangEq
+                    }
                 } else {
                     TokenKind::Bang
                 }
             }
             '@' => TokenKind::At,
+            '#' => TokenKind::Hash,
             '`' => TokenKind::BackTick,
             '=' => {
                 if self.matches('>') {
                     TokenKind::Arrow
                 } else if self.matches('=') {
-                    TokenKind::EqEq
+                    if self.matches('=') {
+                        TokenKind::EqEqEq
+                    } else {
+                        TokenKind::EqEq
+                    }
                 } else {
                     TokenKind::Eq
                 }
             }
-            '&' if self.matches('&') => TokenKind::AndAnd,
-            '&' => TokenKind::Ampersand,
-            '|' if self.matches('|') => TokenKind::OrOr,
-            '|' => TokenKind::Pipe,
+            '&' => {
+                if self.matches('&') {
+                    if self.matches('=') {
+                        TokenKind::AndAndEq
+                    } else {
+                        TokenKind::AndAnd
+                    }
+                } else if self.matches('=') {
+                    TokenKind::AmpersandEq
+                } else {
+                    TokenKind::Ampersand
+                }
+            }
+            '|' => {
+                if self.matches('|') {
+                    if self.matches('=') {
+                        TokenKind::OrOrEq
+                    } else {
+                        TokenKind::OrOr
+                    }
+                } else if self.matches('=') {
+                    TokenKind::PipeEq
+                } else {
+                    TokenKind::Pipe
+                }
+            }
             '\'' | '"' => return self.lex_string(start, ch),
             c if c.is_ascii_digit() => return Ok(self.lex_number(start)),
             c if is_ident_start(c) => return Ok(self.lex_ident(start)),
@@ -398,8 +546,53 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    fn lex_regex(&mut self, start: usize) -> Result<Token, NoriError> {
+        let mut in_class = false;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(NoriError::Lex {
+                        message: "unterminated regex literal".to_string(),
+                        span: source_span(start, self.pos),
+                    });
+                }
+                Some('\\') => {
+                    self.advance();
+                    if !self.is_at_end() {
+                        self.advance();
+                    }
+                }
+                Some('[') => {
+                    self.advance();
+                    in_class = true;
+                }
+                Some(']') => {
+                    self.advance();
+                    in_class = false;
+                }
+                Some('/') if !in_class => {
+                    self.advance();
+                    break;
+                }
+                Some('\n') if !in_class => {
+                    return Err(NoriError::Lex {
+                        message: "unterminated regex literal".to_string(),
+                        span: source_span(start, self.pos),
+                    });
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        while matches!(self.peek(), Some(ch) if ch.is_ascii_alphabetic()) {
+            self.advance();
+        }
+        Ok(self.make_token(TokenKind::RegExp, start, self.pos))
+    }
+
     fn lex_number(&mut self, start: usize) -> Token {
-        while matches!(self.peek(), Some(ch) if ch.is_ascii_digit()) {
+        while matches!(self.peek(), Some(ch) if ch.is_ascii_digit() || ch == '_') {
             self.advance();
         }
         if self.peek() == Some('.')
@@ -407,12 +600,16 @@ impl<'a> Lexer<'a> {
                 .source
                 .get(self.pos + 1..)
                 .and_then(|tail| tail.chars().next())
-                .is_some_and(|ch| ch.is_ascii_digit())
+                .is_some_and(|ch| ch.is_ascii_digit() || ch == '_')
         {
             self.advance();
-            while matches!(self.peek(), Some(ch) if ch.is_ascii_digit()) {
+            while matches!(self.peek(), Some(ch) if ch.is_ascii_digit() || ch == '_') {
                 self.advance();
             }
+        }
+        if self.peek() == Some('n') {
+            self.advance();
+            return self.make_token(TokenKind::BigInt, start, self.pos);
         }
         self.make_token(TokenKind::Number, start, self.pos)
     }
@@ -463,10 +660,25 @@ impl<'a> Lexer<'a> {
         if matches!(self.mode, Mode::MarkupExpr { .. }) {
             return false;
         }
+        if matches!(self.mode, Mode::MarkupText | Mode::MarkupTag) {
+            return true;
+        }
+        if self.source[..start].trim_end().ends_with("return") {
+            return true;
+        }
+        if self.follows_type_angle_callee(start) {
+            return false;
+        }
         let next = self.peek();
         next.is_some_and(|ch| ch.is_ascii_alphabetic() || matches!(ch, '/' | '>'))
-            || matches!(self.mode, Mode::MarkupText | Mode::MarkupTag)
-            || self.source[..start].trim_end().ends_with("return")
+    }
+
+    fn follows_type_angle_callee(&self, start: usize) -> bool {
+        self.source[..start]
+            .chars()
+            .rev()
+            .find(|ch| !ch.is_whitespace())
+            .is_some_and(|ch| is_ident_continue(ch) || matches!(ch, ')' | ']' | '>'))
     }
 
     fn make_token(&self, kind: TokenKind, start: usize, end: usize) -> Token {
@@ -549,6 +761,10 @@ fn keyword(text: &str) -> Option<Keyword> {
         "catch" => Keyword::Catch,
         "finally" => Keyword::Finally,
         "for" => Keyword::For,
+        "while" => Keyword::While,
+        "do" => Keyword::Do,
+        "break" => Keyword::Break,
+        "continue" => Keyword::Continue,
         "in" => Keyword::In,
         "of" => Keyword::Of,
         "yield" => Keyword::Yield,
@@ -561,6 +777,18 @@ fn keyword(text: &str) -> Option<Keyword> {
         "true" => Keyword::True,
         "false" => Keyword::False,
         "null" => Keyword::Null,
+        "new" => Keyword::New,
+        "this" => Keyword::This,
+        "super" => Keyword::Super,
+        "delete" => Keyword::Delete,
+        "void" => Keyword::Void,
+        "typeof" => Keyword::Typeof,
+        "instanceof" => Keyword::Instanceof,
+        "switch" => Keyword::Switch,
+        "case" => Keyword::Case,
+        "throw" => Keyword::Throw,
+        "debugger" => Keyword::Debugger,
+        "with" => Keyword::With,
         _ => return None,
     })
 }
