@@ -25,7 +25,7 @@ impl TokenCursor {
     }
 
     pub fn bump(&mut self) -> Token {
-        let token = self.peek().clone();
+        let token = *self.peek();
         self.pos += 1;
         token
     }

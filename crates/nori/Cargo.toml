@@ -12,11 +12,20 @@ thiserror = "2.0"
 notify = "8"
 serde_json = "1.0"
 nori-ast = { path = "../nori-ast" }
+nori-allocator = { path = "../nori-allocator" }
 nori-lexer = { path = "../nori-lexer" }
 nori-parser = { path = "../nori-parser" }
 nori-analyzer = { path = "../nori-analyzer" }
 nori-codegen = { path = "../nori-codegen" }
 nori-diagnostic = { path = "../nori-diagnostic" }
+nori-semantic = { path = "../nori-semantic" }
+nori-checker = { path = "../nori-checker" }
+nori-bundler = { path = "../nori-bundler" }
 
 [dev-dependencies]
 similar = "3.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "compile_todo"
+harness = false

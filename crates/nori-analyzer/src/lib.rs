@@ -19,7 +19,7 @@ pub struct Analysis {
 }
 
 impl Analysis {
-    pub fn from_program(_source: &str, program: &Program) -> Self {
+    pub fn from_program(_source: &str, program: &Program<'_>) -> Self {
         Analyzer::new().analyze(program)
     }
 }
@@ -37,14 +37,14 @@ impl Analyzer {
         }
     }
 
-    fn analyze(mut self, program: &Program) -> Analysis {
+    fn analyze(mut self, program: &Program<'_>) -> Analysis {
         for stmt in &program.body {
             self.visit_stmt(stmt);
         }
         self.analysis
     }
 
-    fn visit_stmt(&mut self, stmt: &Stmt) {
+    fn visit_stmt(&mut self, stmt: &Stmt<'_>) {
         match stmt {
             Stmt::Var(var) => self.visit_var(var),
             Stmt::Function(function) | Stmt::ExportDefaultFunction(function) => {
@@ -137,13 +137,17 @@ impl Analyzer {
             }
             Stmt::Import(import) => {
                 if import.source.ends_with(".nori") {
-                    self.analysis.nori_imports.push(import.source.clone());
+                    self.analysis.nori_imports.push(import.source.to_string());
                 } else if !import.source.starts_with('.') && !import.source.starts_with('@') {
-                    self.analysis.imports.push(import.source.clone());
+                    self.analysis.imports.push(import.source.to_string());
                 }
             }
             Stmt::Export(_)
             | Stmt::TypeOnly(_)
+            | Stmt::TypeAlias(_)
+            | Stmt::Interface(_)
+            | Stmt::Enum(_)
+            | Stmt::Module(_)
             | Stmt::Return(None, _)
             | Stmt::Break(_)
             | Stmt::Continue(_)
@@ -230,11 +234,11 @@ impl Analyzer {
 
             match binding {
                 Binding::Signal => {
-                    self.analysis.signals.insert(declarator.name.clone());
+                    self.analysis.signals.insert(declarator.name.to_string());
                     self.analysis.runtime_symbols.insert("signal".to_string());
                 }
                 Binding::Computed => {
-                    self.analysis.computeds.insert(declarator.name.clone());
+                    self.analysis.computeds.insert(declarator.name.to_string());
                     self.analysis.runtime_symbols.insert("computed".to_string());
                 }
                 Binding::Local => {}
@@ -366,6 +370,7 @@ impl Analyzer {
     }
 
     fn visit_markup_node(&mut self, node: &MarkupNode) {
+        self.analysis.runtime_symbols.insert("h".to_string());
         match node {
             MarkupNode::Element(element) => {
                 for attribute in &element.attributes {
@@ -379,7 +384,10 @@ impl Analyzer {
                 }
                 self.visit_markup_children(&element.children);
             }
-            MarkupNode::Fragment { children, .. } => self.visit_markup_children(children),
+            MarkupNode::Fragment { children, .. } => {
+                self.analysis.runtime_symbols.insert("fragment".to_string());
+                self.visit_markup_children(children);
+            }
         }
     }
 
@@ -457,7 +465,7 @@ impl Analyzer {
             .insert(name.to_string(), binding);
     }
 
-    fn reactive_value_name<'expr>(&self, expr: &'expr Expr) -> Option<&'expr str> {
+    fn reactive_value_name<'expr, 'ast>(&self, expr: &'expr Expr<'ast>) -> Option<&'expr str> {
         let expr = erase_type_wrappers(expr);
         let ExprKind::Member {
             object, property, ..
@@ -465,14 +473,14 @@ impl Analyzer {
         else {
             return None;
         };
-        if property != "value" {
+        if property.as_str() != "value" {
             return None;
         }
         let object = erase_type_wrappers(object);
         let ExprKind::Ident(name) = &object.kind else {
             return None;
         };
-        self.is_reactive(name).then_some(name)
+        self.is_reactive(name.as_str()).then_some(name.as_str())
     }
 
     fn is_reactive(&self, name: &str) -> bool {
@@ -574,7 +582,7 @@ fn assignment_access(op: &str) -> ValueAccess {
     }
 }
 
-pub fn primitive_call_name(expr: &Expr) -> Option<&str> {
+pub fn primitive_call_name<'a>(expr: &'a Expr<'_>) -> Option<&'a str> {
     let expr = erase_type_wrappers(expr);
     let ExprKind::Call { callee, .. } = &expr.kind else {
         return None;
@@ -582,10 +590,10 @@ pub fn primitive_call_name(expr: &Expr) -> Option<&str> {
     let ExprKind::Ident(name) = &callee.kind else {
         return None;
     };
-    matches!(name.as_str(), "$state" | "$derived" | "$effect").then_some(name)
+    matches!(name.as_str(), "$state" | "$derived" | "$effect").then_some(name.as_str())
 }
 
-fn erase_type_wrappers(mut expr: &Expr) -> &Expr {
+fn erase_type_wrappers<'a, 'ast>(mut expr: &'a Expr<'ast>) -> &'a Expr<'ast> {
     while let ExprKind::TypeErasure { expr: inner, .. } = &expr.kind {
         expr = inner;
     }

@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+**/*.map
+.DS_Store
+.gitignore
+*.vsix
+bun.lock
+package-lock.json
+yarn.lock
+# Dev-only tooling; production deps (prettier) are included by vsce.
+node_modules/@types/**
+node_modules/@vscode/**
+node_modules/.bin/**

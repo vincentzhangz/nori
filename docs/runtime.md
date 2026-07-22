@@ -1,8 +1,14 @@
-# Runtime
+# Runtime (`@nori/core`)
 
-The runtime package lives in `packages/core` and is published as `@nori/core`.
+Package: `packages/core` → npm name **`@nori/core`**.
 
-It currently exports:
+Build before running examples:
+
+```sh
+bun run --cwd packages/core build
+```
+
+## Reactivity
 
 ```ts
 export function signal<T>(initial: T): NoriSignal<T>;
@@ -10,8 +16,6 @@ export function computed<T>(fn: () => T): NoriSignal<T>;
 export function effect(fn: () => void): () => void;
 export function batch(fn: () => void): void;
 ```
-
-## Signal API
 
 ```ts
 export interface NoriSignal<T> {
@@ -21,35 +25,48 @@ export interface NoriSignal<T> {
 }
 ```
 
-Nori preserves `.value` reads and writes in compiled output.
+Nori preserves `.value` in generated code. Reads subscribe effects; writes notify.
 
-Example:
+| Nori source | Emitted JS |
+| --- | --- |
+| `$state(0)` | `signal(0)` |
+| `$derived(count.value * 2)` | `computed(() => count.value * 2)` |
+| `$effect(() => { ... })` | `effect(() => { ... })` |
+
+## Renderer
+
+Markup is lowered to `h` (not React `createElement`):
 
 ```ts
-const count = $state(0);
-count.value += 1;
+export function h(
+  tag: string | ((props: unknown) => unknown),
+  props: Record<string, unknown> | null,
+  ...children: unknown[]
+): VNode;
+
+export function fragment(...children: unknown[]): VNode;
+export function text(value: unknown): VNode;
+
+export function mount(
+  component: unknown,
+  el: Element,
+  props?: Record<string, unknown>
+): () => void;
+
+export function hydrate(vnode: unknown, el: Element): () => void;
+export function renderToString(vnode: unknown): string;
 ```
 
-Compiles to:
+### Conventions
 
-```ts
-const count = signal(0);
-count.value += 1;
-```
+- **Events:** attributes are kept as authored (e.g. `onclick`). The runtime treats `on*` props as DOM listeners (`onclick` → `click`).
+- **Fine-grained children:** codegen wraps dynamic children in `() => ...`. `mount` / `h` re-run those getters inside `effect` when signals change.
+- **SSR:** `renderToString` evaluates signals once to HTML; `hydrate` attaches listeners/effects to existing DOM.
 
-The runtime implements `.value` as an accessor, so reads can subscribe effects and writes can notify subscribers.
-
-## Testing Runtime Behavior
-
-Run:
+## Tests
 
 ```sh
+bun test packages/core
+# or from root:
 bun test
 ```
-
-The current tests cover:
-
-- `signal.value`, `get`, and `set`.
-- `computed`.
-- `effect`.
-- `batch`.

@@ -9,5 +9,9 @@ members = [
     "crates/nori-parser",
     "crates/nori-analyzer",
     "crates/nori-codegen",
+    "crates/nori-semantic",
+    "crates/nori-checker",
     "crates/nori",
+    "crates/nori-wasm",
+    "crates/nori-bundler",
 ]

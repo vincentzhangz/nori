@@ -1,12 +1,19 @@
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nori_analyzer::{Analysis, primitive_call_name};
 use nori_ast::{
     ArrowBody, BlockStmt, ClassAccessor, ClassConstructor, ClassField, ClassMember, ClassMethod,
-    ClassStaticBlock, ClassicForStmt, DoWhileStmt, Expr, ExprKind, ForInit, ForStmt, FunctionDecl,
-    IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param, Pattern, Program, Span,
-    Stmt, TryStmt, VarDecl, VarKind, WhileStmt,
+    ClassStaticBlock, ClassicForStmt, DoWhileStmt, EnumDecl, Expr, ExprKind, ForInit, ForStmt,
+    FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param, Pattern,
+    Program, Stmt, TryStmt, VarDecl, VarKind, WhileStmt,
 };
+
+type ConstEnumTable = BTreeMap<String, BTreeMap<String, String>>;
+
+thread_local! {
+    static CONST_ENUMS: RefCell<ConstEnumTable> = const { RefCell::new(BTreeMap::new()) };
+}
 
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
@@ -19,8 +26,12 @@ pub fn generate(
     analysis: &Analysis,
     runtime_import_path: &str,
 ) -> String {
+    let const_enums = collect_const_enums(source, program);
+    CONST_ENUMS.with(|slot| {
+        *slot.borrow_mut() = const_enums;
+    });
+
     let mut out = String::new();
-    let mut emitted_runtime = false;
 
     if !analysis.runtime_symbols.is_empty() && !has_runtime_import(source, runtime_import_path) {
         out.push_str(&runtime_import_fn(
@@ -28,17 +39,78 @@ pub fn generate(
             runtime_import_path,
         ));
         out.push('\n');
-        emitted_runtime = true;
     }
 
-    for (idx, stmt) in program.body.iter().enumerate() {
-        if idx > 0 || emitted_runtime {
+    let mut first = out.is_empty();
+    for stmt in &program.body {
+        if is_erased_stmt(stmt) {
+            continue;
+        }
+        if !first {
             out.push('\n');
         }
+        first = false;
         emit_stmt(source, stmt, &mut out, 0);
     }
 
-    out.trim_end().to_string()
+    CONST_ENUMS.with(|slot| slot.borrow_mut().clear());
+    out
+}
+
+fn collect_const_enums(source: &str, program: &Program<'_>) -> ConstEnumTable {
+    let mut table = ConstEnumTable::new();
+    for stmt in &program.body {
+        let Stmt::Enum(enum_decl) = stmt else {
+            continue;
+        };
+        if !enum_decl.is_const {
+            continue;
+        }
+        let mut members = BTreeMap::new();
+        let mut auto = 0i64;
+        for member in &enum_decl.members {
+            let value = if let Some(init) = &member.init {
+                match &init.kind {
+                    ExprKind::Number(n) => {
+                        if let Ok(v) = n.as_str().replace('_', "").parse::<i64>() {
+                            auto = v + 1;
+                        }
+                        n.as_str().to_string()
+                    }
+                    ExprKind::String(s) => {
+                        auto += 1;
+                        format!("\"{}\"", s.as_str())
+                    }
+                    _ => {
+                        auto += 1;
+                        source_slice(source, init.span.start, init.span.end)
+                            .trim()
+                            .to_string()
+                    }
+                }
+            } else {
+                let v = auto.to_string();
+                auto += 1;
+                v
+            };
+            members.insert(member.name.as_str().to_string(), value);
+        }
+        table.insert(enum_decl.name.as_str().to_string(), members);
+    }
+    table
+}
+
+fn is_erased_stmt(stmt: &Stmt<'_>) -> bool {
+    matches!(
+        stmt,
+        Stmt::TypeOnly(_)
+            | Stmt::TypeAlias(_)
+            | Stmt::Interface(_)
+            | Stmt::Module(_)
+            | Stmt::Export(nori_ast::ExportDecl::TypeOnly(_))
+            | Stmt::Import(nori_ast::ImportDecl { is_type: true, .. })
+            | Stmt::Enum(EnumDecl { is_const: true, .. })
+    )
 }
 
 fn emit_import(_source: &str, import: &nori_ast::ImportDecl, out: &mut String) {
@@ -73,11 +145,16 @@ fn emit_import(_source: &str, import: &nori_ast::ImportDecl, out: &mut String) {
 
 fn emit_export(source: &str, export: &nori_ast::ExportDecl, out: &mut String, indent: usize) {
     match export {
+        nori_ast::ExportDecl::TypeOnly(_) => {}
         nori_ast::ExportDecl::Named {
             specifiers,
             source: src,
+            is_type,
             ..
         } => {
+            if *is_type {
+                return;
+            }
             out.push_str("export { ");
             for (idx, spec) in specifiers.iter().enumerate() {
                 if idx > 0 {
@@ -133,7 +210,8 @@ fn emit_stmt(source: &str, stmt: &Stmt, out: &mut String, indent: usize) {
             push_indent(out, indent);
             out.push_str(source_slice(source, raw.span.start, raw.span.end).trim());
         }
-        Stmt::TypeOnly(_) => {}
+        Stmt::TypeOnly(_) | Stmt::TypeAlias(_) | Stmt::Interface(_) | Stmt::Module(_) => {}
+        Stmt::Enum(enum_decl) => emit_enum(source, enum_decl, out, indent),
         Stmt::Var(var) => emit_var(source, var, out, indent),
         Stmt::Function(function) => emit_function(source, function, out, indent, false),
         Stmt::ExportDefaultFunction(function) => emit_function(source, function, out, indent, true),
@@ -204,6 +282,71 @@ fn emit_var(source: &str, var: &VarDecl, out: &mut String, indent: usize) {
     push_indent(out, indent);
     emit_var_head(source, var, out);
     out.push(';');
+}
+
+fn emit_enum(source: &str, enum_decl: &EnumDecl, out: &mut String, indent: usize) {
+    push_indent(out, indent);
+    let name = enum_decl.name.as_str();
+    // Regular enums lower to a bidirectional object IIFE (numeric) or
+    // forward-only assignments (string members). Const enums are erased and
+    // inlined at use sites (see `CONST_ENUMS` / Member emit).
+    out.push_str("var ");
+    out.push_str(name);
+    out.push_str("; (function (");
+    out.push_str(name);
+    out.push_str(") {\n");
+    let mut auto = 0i64;
+    for member in &enum_decl.members {
+        push_indent(out, indent + 1);
+        let member_name = member.name.as_str();
+        let is_string = matches!(
+            member.init.as_ref().map(|e| &e.kind),
+            Some(ExprKind::String(_))
+        );
+        if is_string {
+            // String enums: no reverse mapping.
+            out.push_str(name);
+            out.push_str("[\"");
+            out.push_str(member_name);
+            out.push_str("\"] = ");
+            if let Some(init) = &member.init {
+                emit_expr(source, init, out);
+            }
+            out.push_str(";\n");
+            auto += 1;
+        } else {
+            out.push_str(name);
+            out.push('[');
+            out.push_str(name);
+            out.push_str("[\"");
+            out.push_str(member_name);
+            out.push_str("\"] = ");
+            if let Some(init) = &member.init {
+                emit_expr(source, init, out);
+                if let ExprKind::Number(n) = &init.kind {
+                    if let Ok(v) = n.as_str().replace('_', "").parse::<i64>() {
+                        auto = v + 1;
+                    } else {
+                        auto += 1;
+                    }
+                } else {
+                    auto += 1;
+                }
+            } else {
+                out.push_str(&auto.to_string());
+                auto += 1;
+            }
+            out.push_str("] = \"");
+            out.push_str(member_name);
+            out.push_str("\";\n");
+        }
+    }
+    push_indent(out, indent);
+    out.push_str("})(");
+    out.push_str(name);
+    out.push_str(" || (");
+    out.push_str(name);
+    out.push_str(" = {}));");
 }
 
 fn emit_var_head(source: &str, var: &VarDecl, out: &mut String) {
@@ -384,7 +527,7 @@ fn emit_class_field(source: &str, field: &ClassField, out: &mut String, indent: 
 fn emit_member_name(
     name: &str,
     is_private: bool,
-    computed: &Option<Box<Expr>>,
+    computed: &Option<nori_ast::Box<'_, Expr<'_>>>,
     source: &str,
     out: &mut String,
 ) {
@@ -772,6 +915,19 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             property,
             optional,
         } => {
+            if !*optional {
+                if let ExprKind::Ident(enum_name) = &object.kind {
+                    let inlined = CONST_ENUMS.with(|slot| {
+                        slot.borrow()
+                            .get(enum_name.as_str())
+                            .and_then(|members| members.get(property.as_str()).cloned())
+                    });
+                    if let Some(value) = inlined {
+                        out.push_str(&value);
+                        return;
+                    }
+                }
+            }
             emit_expr(source, object, out);
             if *optional {
                 out.push_str("?.");
@@ -796,10 +952,15 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
         }
         ExprKind::Arrow { params, body } => {
             if params.len() == 1 {
-                out.push_str(&params[0]);
+                out.push_str(params[0].as_str());
             } else {
                 out.push('(');
-                out.push_str(&params.join(", "));
+                let joined = params
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&joined);
                 out.push(')');
             }
             out.push_str(" => ");
@@ -844,19 +1005,19 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
                         out.push_str(", ");
                     }
                     if prop.shorthand {
-                        out.push_str(&match &prop.key {
-                            nori_ast::PropertyKey::Ident(name) => name.clone(),
-                            _ => String::new(),
+                        out.push_str(match &prop.key {
+                            nori_ast::PropertyKey::Ident(name) => name.as_str(),
+                            _ => "",
                         });
                     } else {
                         match &prop.key {
-                            nori_ast::PropertyKey::Ident(name) => out.push_str(name),
+                            nori_ast::PropertyKey::Ident(name) => out.push_str(name.as_str()),
                             nori_ast::PropertyKey::String(s) => {
                                 out.push('"');
-                                out.push_str(s);
+                                out.push_str(s.as_str());
                                 out.push('"');
                             }
-                            nori_ast::PropertyKey::Number(n) => out.push_str(n),
+                            nori_ast::PropertyKey::Number(n) => out.push_str(n.as_str()),
                             nori_ast::PropertyKey::Computed(expr) => {
                                 out.push('[');
                                 emit_expr(source, expr, out);
@@ -878,127 +1039,162 @@ fn emit_expr(source: &str, expr: &Expr, out: &mut String) {
             out.push_str("await ");
             emit_expr(source, expr, out);
         }
-        ExprKind::Markup(node) => emit_markup_source(source, node, out),
+        ExprKind::Markup(node) => emit_markup(source, node, out),
         ExprKind::Raw => {
             out.push_str(source_slice(source, expr.span.start, expr.span.end).trim());
         }
     }
 }
 
-fn emit_markup_source(source: &str, node: &MarkupNode, out: &mut String) {
-    let span = markup_span(node);
-    let mut text = source_slice(source, span.start, span.end).to_string();
-    let mut edits = Vec::new();
-    collect_markup_expr_replacements(source, node, &mut edits);
-    collect_button_type_insertions(node, &mut edits);
-    edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0));
-
-    for (start, end, replacement) in edits {
-        if span.start <= start && end <= span.end {
-            let local_start = (start - span.start) as usize;
-            let local_end = (end - span.start) as usize;
-            text.replace_range(local_start..local_end, &replacement);
+fn emit_markup(source: &str, node: &MarkupNode, out: &mut String) {
+    match node {
+        MarkupNode::Element(element) => emit_markup_element(source, element, out),
+        MarkupNode::Fragment { children, .. } => {
+            out.push_str("h(fragment, null");
+            emit_markup_children_args(source, children, out);
+            out.push(')');
         }
     }
-
-    out.push_str(text.trim());
 }
 
-fn collect_markup_expr_replacements(
-    source: &str,
-    node: &MarkupNode,
-    edits: &mut Vec<(u32, u32, String)>,
-) {
-    match node {
-        MarkupNode::Element(element) => {
-            for attribute in &element.attributes {
-                match attribute {
-                    MarkupAttribute::Named {
-                        value: Some(expr), ..
-                    }
-                    | MarkupAttribute::Spread { expr, .. } => {
-                        push_markup_expr_replacement(source, expr, edits);
-                    }
-                    MarkupAttribute::Named { value: None, .. } => {}
+fn emit_markup_element(source: &str, element: &MarkupElement, out: &mut String) {
+    out.push_str("h(");
+    emit_markup_tag(element.name.as_str(), out);
+    out.push_str(", ");
+    emit_markup_props(source, element, out);
+    emit_markup_children_args(source, &element.children, out);
+    out.push(')');
+}
+
+fn emit_markup_tag(name: &str, out: &mut String) {
+    if is_component_tag(name) {
+        out.push_str(name);
+    } else {
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+    }
+}
+
+fn is_component_tag(name: &str) -> bool {
+    name.contains('.')
+        || name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn emit_markup_props(source: &str, element: &MarkupElement, out: &mut String) {
+    let needs_button_type = element.name == "button"
+        && !element.attributes.iter().any(|attribute| {
+            matches!(
+                attribute,
+                MarkupAttribute::Named { name, .. } if name.eq_ignore_ascii_case("type")
+            )
+        });
+
+    if element.attributes.is_empty() && !needs_button_type {
+        out.push_str("null");
+        return;
+    }
+
+    out.push_str("{ ");
+    let mut first = true;
+    if needs_button_type {
+        out.push_str("type: \"button\"");
+        first = false;
+    }
+
+    for attribute in &element.attributes {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        match attribute {
+            MarkupAttribute::Named { name, value, .. } => {
+                emit_prop_key(name.as_str(), out);
+                out.push_str(": ");
+                match value {
+                    Some(expr) => emit_expr(source, expr, out),
+                    None => out.push_str("true"),
                 }
             }
-            for child in &element.children {
-                collect_markup_expr_replacements_from_child(source, child, edits);
-            }
-        }
-        MarkupNode::Fragment { children, .. } => {
-            for child in children {
-                collect_markup_expr_replacements_from_child(source, child, edits);
+            MarkupAttribute::Spread { expr, .. } => {
+                out.push_str("...");
+                emit_expr(source, expr, out);
             }
         }
     }
+    out.push_str(" }");
 }
 
-fn collect_markup_expr_replacements_from_child(
-    source: &str,
-    child: &MarkupChild,
-    edits: &mut Vec<(u32, u32, String)>,
-) {
-    match child {
-        MarkupChild::Expr(expr) => push_markup_expr_replacement(source, expr, edits),
-        MarkupChild::Node(node) => collect_markup_expr_replacements(source, node, edits),
-        MarkupChild::Text(_, _) => {}
+fn emit_prop_key(name: &str, out: &mut String) {
+    if is_ident_prop_key(name) {
+        out.push_str(name);
+    } else {
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
     }
 }
 
-fn push_markup_expr_replacement(
-    source: &str,
-    expr: &Expr,
-    edits: &mut Vec<(u32, u32, String)>,
-) {
-    let mut replacement = String::new();
-    emit_expr(source, expr, &mut replacement);
-    edits.push((expr.span.start, expr.span.end, replacement));
+fn is_ident_prop_key(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch == '$' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
-fn collect_button_type_insertions(node: &MarkupNode, edits: &mut Vec<(u32, u32, String)>) {
-    match node {
-        MarkupNode::Element(element) => collect_button_type_insertions_from_element(element, edits),
-        MarkupNode::Fragment { children, .. } => {
-            for child in children {
-                collect_button_type_insertions_from_child(child, edits);
+fn emit_markup_children_args(source: &str, children: &[MarkupChild], out: &mut String) {
+    for child in children {
+        match child {
+            MarkupChild::Text(text, _) => {
+                let trimmed = collapse_markup_text(text.as_str());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                out.push_str(", ");
+                emit_js_string(&trimmed, out);
+            }
+            MarkupChild::Expr(expr) => {
+                out.push_str(", () => ");
+                emit_expr(source, expr, out);
+            }
+            MarkupChild::Node(node) => {
+                out.push_str(", ");
+                emit_markup(source, node, out);
             }
         }
     }
 }
 
-fn collect_button_type_insertions_from_element(
-    element: &MarkupElement,
-    edits: &mut Vec<(u32, u32, String)>,
-) {
-    if element.name == "button"
-        && !element.attributes.iter().any(|attribute| {
-            matches!(attribute, MarkupAttribute::Named { name, .. } if name.eq_ignore_ascii_case("type"))
-        })
-    {
-        let offset = element.span.start + 1 + element.name.len() as u32;
-        edits.push((offset, offset, r#" type="button""#.to_string()));
+fn collapse_markup_text(text: &str) -> String {
+    if text.chars().all(|ch| ch.is_whitespace()) {
+        // Drop indentation / newline-only text; keep interstitial spaces
+        // between expression children (JSX-style).
+        if text.contains('\n') {
+            return String::new();
+        }
+        return " ".to_string();
     }
-
-    for child in &element.children {
-        collect_button_type_insertions_from_child(child, edits);
-    }
+    text.to_string()
 }
 
-fn collect_button_type_insertions_from_child(
-    child: &MarkupChild,
-    edits: &mut Vec<(u32, u32, String)>,
-) {
-    if let MarkupChild::Node(node) = child {
-        collect_button_type_insertions(node, edits);
+fn emit_js_string(value: &str, out: &mut String) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
     }
-}
-
-fn markup_span(node: &MarkupNode) -> Span {
-    match node {
-        MarkupNode::Element(element) => element.span,
-        MarkupNode::Fragment { span, .. } => *span,
-    }
+    out.push('"');
 }
 
 fn emit_primitive_call(source: &str, expr: &Expr, name: &str, out: &mut String) {
@@ -1009,7 +1205,7 @@ fn emit_primitive_call(source: &str, expr: &Expr, name: &str, out: &mut String) 
     match name {
         "$state" => {
             out.push_str("signal(");
-            emit_arg_list(source, args, out);
+            emit_arg_list(source, args.as_slice(), out);
             out.push(')');
         }
         "$derived" => {
@@ -1021,21 +1217,21 @@ fn emit_primitive_call(source: &str, expr: &Expr, name: &str, out: &mut String) 
         }
         "$effect" => {
             out.push_str("effect(");
-            emit_arg_list(source, args, out);
+            emit_arg_list(source, args.as_slice(), out);
             out.push(')');
         }
         _ => {}
     }
 }
 
-fn erase_type_wrappers(mut expr: &Expr) -> &Expr {
+fn erase_type_wrappers<'a, 'ast>(mut expr: &'a Expr<'ast>) -> &'a Expr<'ast> {
     while let ExprKind::TypeErasure { expr: inner, .. } = &expr.kind {
         expr = inner;
     }
     expr
 }
 
-fn emit_arg_list(source: &str, args: &[Expr], out: &mut String) {
+fn emit_arg_list(source: &str, args: &[Expr<'_>], out: &mut String) {
     for (idx, arg) in args.iter().enumerate() {
         if idx > 0 {
             out.push_str(", ");
@@ -1055,9 +1251,7 @@ fn runtime_import_fn(symbols: &BTreeSet<String>, runtime_import: &str) -> String
 }
 
 fn source_slice(source: &str, start: u32, end: u32) -> &str {
-    source
-        .get(start as usize..end as usize)
-        .unwrap_or_default()
+    source.get(start as usize..end as usize).unwrap_or_default()
 }
 
 fn push_indent(out: &mut String, indent: usize) {

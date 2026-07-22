@@ -47,6 +47,17 @@ enum Command {
     Lex { input: PathBuf },
     /// Print the parsed AST for a Nori source file
     Parse { input: PathBuf },
+    /// Type-check a Nori/TypeScript source file
+    Check { input: PathBuf },
+    /// Bundle an entry module and its relative imports (nori-bundler)
+    Bundle {
+        entry: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Emit each module with FILE separators instead of a single concat banner
+        #[arg(long)]
+        multi_file: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -65,6 +76,12 @@ fn main() -> Result<()> {
         } => watch_command(&input, output.as_deref(), &runtime_import),
         Command::Lex { input } => lex_command(&input),
         Command::Parse { input } => parse_command(&input),
+        Command::Check { input } => check_command(&input),
+        Command::Bundle {
+            entry,
+            output,
+            multi_file,
+        } => bundle_command(&entry, output.as_deref(), multi_file),
     }
 }
 
@@ -89,6 +106,7 @@ fn compile_command(
                 input.display().to_string()
             },
             runtime_import: runtime_import.to_string(),
+            ..CompileOptions::default()
         },
     )?;
 
@@ -198,7 +216,10 @@ fn lex_command(input: &Path) -> Result<()> {
         let pos = map.span_start(token.span);
         println!(
             "{:?} {:?} @ {}:{}",
-            token.kind, token.lexeme, pos.line, pos.column
+            token.kind,
+            token.lexeme(&source),
+            pos.line,
+            pos.column
         );
     }
     Ok(())
@@ -206,8 +227,52 @@ fn lex_command(input: &Path) -> Result<()> {
 
 fn parse_command(input: &Path) -> Result<()> {
     let source = fs::read_to_string(input).into_diagnostic()?;
-    let program = parse_source(&source, input.display().to_string())?;
+    let allocator = nori::Allocator::new();
+    let program = parse_source(&allocator, &source, input.display().to_string())?;
     println!("{program:#?}");
+    Ok(())
+}
+
+fn check_command(input: &Path) -> Result<()> {
+    // Production path: always runs the full M1–M8 checker (narrowing, conditionals,
+    // keyof, lib globals, component props).
+    let source = fs::read_to_string(input).into_diagnostic()?;
+    let result = nori::check_source(&source, input.display().to_string())?;
+    if result.diagnostics.is_empty() {
+        println!("No type errors in {}", input.display());
+        return Ok(());
+    }
+    for diag in &result.diagnostics {
+        eprintln!("{}: {}", diag.code, diag.message);
+    }
+    let error_count = result.diagnostics.iter().filter(|d| d.is_error()).count();
+    if error_count > 0 {
+        miette::bail!("{error_count} type error(s) in {}", input.display());
+    }
+    Ok(())
+}
+
+fn bundle_command(entry: &Path, output: Option<&Path>, multi_file: bool) -> Result<()> {
+    use nori_bundler::{BundleOptions, EmitMode, bundle_with_options};
+
+    let options = BundleOptions {
+        emit: if multi_file {
+            EmitMode::MultiFile
+        } else {
+            EmitMode::Concatenated
+        },
+    };
+    let result = bundle_with_options(entry, options).into_diagnostic()?;
+
+    if let Some(output) = output {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).into_diagnostic()?;
+        }
+        fs::write(output, &result.code).into_diagnostic()?;
+        println!("{}", output.display());
+    } else {
+        print!("{}", result.code);
+    }
     Ok(())
 }
 

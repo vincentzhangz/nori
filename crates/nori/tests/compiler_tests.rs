@@ -1,5 +1,5 @@
 use nori::{
-    CompileOptions, analyze_source, compile_source,
+    Allocator, CompileOptions, analyze_source, compile_source,
     lexer::{LexContext, TokenKind, lex, lex_with_context},
     parse_source,
     parser::{Parser, Syntax},
@@ -33,13 +33,12 @@ impl Drop for TempDir {
 
 #[test]
 fn lexer_tracks_markup_text_and_spans() {
-    let source =
-        "return <button type=\"button\" onclick={() => count.value += 1}>Click</button>;";
+    let source = "return <button type=\"button\" onclick={() => count.value += 1}>Click</button>;";
     let tokens = lex(source).unwrap();
     let map = nori::ast::SourceMap::new(source);
 
-    assert!(tokens.iter().any(|token| token.lexeme == "button"));
-    assert!(tokens.iter().any(|token| token.lexeme == "Click"));
+    assert!(tokens.iter().any(|token| token.lexeme(source) == "button"));
+    assert!(tokens.iter().any(|token| token.lexeme(source) == "Click"));
     let pos = map.span_start(tokens[0].span);
     assert_eq!(pos.line, 1);
     assert_eq!(pos.column, 1);
@@ -142,28 +141,52 @@ fn lexer_handles_bigint() {
 
 #[test]
 fn lexer_handles_numeric_separators() {
-    let tokens = lex("1_000 1_000.5_5").unwrap();
-    assert!(tokens.iter().any(|t| t.lexeme == "1_000"));
-    assert!(tokens.iter().any(|t| t.lexeme.contains("1_000.5_5")));
+    let source = "1_000 1_000.5_5";
+    let tokens = lex(source).unwrap();
+    assert!(tokens.iter().any(|t| t.lexeme(source) == "1_000"));
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.lexeme(source).contains("1_000.5_5"))
+    );
 }
 
 #[test]
 fn lexer_skips_shebang() {
-    let tokens = lex("#!/usr/bin/env node\nconst x = 1;").unwrap();
-    assert!(tokens.iter().any(|t| t.lexeme == "const"));
-    assert!(!tokens.iter().any(|t| t.lexeme.contains("#!/usr")));
+    let source = "#!/usr/bin/env node\nconst x = 1;";
+    let tokens = lex(source).unwrap();
+    assert!(tokens.iter().any(|t| t.lexeme(source) == "const"));
+    assert!(!tokens.iter().any(|t| t.lexeme(source).contains("#!/usr")));
+}
+
+#[test]
+fn lexer_records_comment_trivia() {
+    let source = "// line\nconst x = 1; /* block */";
+    let output = nori::lexer::lex_with_trivia(source, LexContext::Normal).unwrap();
+    assert_eq!(output.trivia.len(), 2);
+    assert_eq!(output.trivia[0].kind, nori::lexer::TriviaKind::LineComment);
+    assert_eq!(output.trivia[0].span.source_text(source), "// line");
+    assert_eq!(output.trivia[1].kind, nori::lexer::TriviaKind::BlockComment);
+    assert_eq!(output.trivia[1].span.source_text(source), "/* block */");
+    assert!(
+        output
+            .tokens
+            .iter()
+            .any(|t| t.kind == TokenKind::Keyword(nori::lexer::Keyword::Const))
+    );
 }
 
 #[test]
 fn lexer_parses_regex_literals_with_context() {
-    let tokens = lex_with_context("/foo/g /bar/i", LexContext::ExpectRegex).unwrap();
+    let source = "/foo/g /bar/i";
+    let tokens = lex_with_context(source, LexContext::ExpectRegex).unwrap();
     let regexps: Vec<_> = tokens
         .iter()
         .filter(|t| t.kind == TokenKind::RegExp)
         .collect();
     assert_eq!(regexps.len(), 2);
-    assert_eq!(regexps[0].lexeme, "/foo/g");
-    assert_eq!(regexps[1].lexeme, "/bar/i");
+    assert_eq!(regexps[0].lexeme(source), "/foo/g");
+    assert_eq!(regexps[1].lexeme(source), "/bar/i");
 }
 
 #[test]
@@ -175,23 +198,25 @@ fn lexer_does_not_parse_regex_in_normal_context() {
 
 #[test]
 fn lexer_handles_regex_with_escaped_slash() {
-    let tokens = lex_with_context(r"/foo\/bar/g", LexContext::ExpectRegex).unwrap();
+    let source = r"/foo\/bar/g";
+    let tokens = lex_with_context(source, LexContext::ExpectRegex).unwrap();
     let regexp = tokens.iter().find(|t| t.kind == TokenKind::RegExp).unwrap();
-    assert_eq!(regexp.lexeme, r"/foo\/bar/g");
+    assert_eq!(regexp.lexeme(source), r"/foo\/bar/g");
 }
 
 #[test]
 fn lexer_handles_regex_character_class() {
-    let tokens = lex_with_context(r"/[a-z]/g", LexContext::ExpectRegex).unwrap();
+    let source = r"/[a-z]/g";
+    let tokens = lex_with_context(source, LexContext::ExpectRegex).unwrap();
     let regexp = tokens.iter().find(|t| t.kind == TokenKind::RegExp).unwrap();
-    assert_eq!(regexp.lexeme, r"/[a-z]/g");
+    assert_eq!(regexp.lexeme(source), r"/[a-z]/g");
 }
 
 #[test]
 fn lexer_handles_regex_in_binary_expression() {
     let source = "x /y/g";
     let tokens = lex(source).unwrap();
-    assert!(tokens.iter().any(|t| t.lexeme == "x"));
+    assert!(tokens.iter().any(|t| t.lexeme(source) == "x"));
     assert!(tokens.iter().any(|t| t.kind == TokenKind::Slash));
 }
 
@@ -210,7 +235,8 @@ fn lexer_slash_greater_not_affected_by_regex_context() {
 #[test]
 fn parser_builds_component_ast() {
     let source = include_str!("fixtures/Counter.nori");
-    let program = parse_source(source, "Counter.nori").unwrap();
+    let allocator = Allocator::new();
+    let program = parse_source(&allocator, source, "Counter.nori").unwrap();
 
     assert!(!program.body.is_empty());
 }
@@ -219,10 +245,17 @@ fn parser_builds_component_ast() {
 fn parser_accepts_explicit_nori_syntax_config() {
     let source = include_str!("fixtures/Counter.nori");
     let tokens = lex(source).unwrap();
-    let program =
-        Parser::new_with_syntax(source, "Counter.nori".to_string(), tokens, Syntax::nori())
-            .parse_program()
-            .unwrap();
+    let allocator = Allocator::new();
+    let program = Parser::new_with_syntax(
+        &allocator,
+        source,
+        "Counter.nori".to_string(),
+        tokens,
+        Syntax::nori(),
+    )
+    .parse_program()
+    .into_result()
+    .unwrap();
 
     assert!(!program.body.is_empty());
 }
@@ -238,7 +271,7 @@ fn parser_accepts_keyword_markup_attributes() {
     assert!(
         output
             .code
-            .contains(r#"<button type="button">Click</button>"#)
+            .contains(r#"h("button", { type: "button" }, "Click")"#)
     );
 }
 
@@ -255,7 +288,7 @@ fn codegen_defaults_button_type_when_missing() {
     assert!(
         output
             .code
-            .contains(r#"<button type="button" onclick={save}>Save</button>"#)
+            .contains(r#"h("button", { type: "button", onclick: save }, "Save")"#)
     );
 }
 
@@ -270,9 +303,9 @@ fn codegen_preserves_explicit_button_type() {
     assert!(
         output
             .code
-            .contains(r#"<button type="submit">Save</button>"#)
+            .contains(r#"h("button", { type: "submit" }, "Save")"#)
     );
-    assert!(!output.code.contains(r#"type="button" type="submit""#));
+    assert!(!output.code.contains(r#"type: "button", type: "submit""#));
 }
 
 #[test]
@@ -387,7 +420,7 @@ export default function Counter() {
     assert!(
         output
             .code
-            .contains("import { computed, signal } from \"@nori/core\";")
+            .contains("import { computed, h, signal } from \"@nori/core\";")
     );
     assert!(output.code.contains("const count = signal(0);"));
     assert!(
@@ -476,7 +509,8 @@ fn cli_compile_writes_named_file_to_output_directory() {
 
     let code = fs::read_to_string(output_path).unwrap();
     assert!(code.contains("from \"@nori/core\";"));
-    assert!(code.contains("type=\"button\""));
+    assert!(code.contains(r#"type: "button""#));
+    assert!(code.contains("h("));
 }
 
 #[test]
@@ -518,8 +552,8 @@ export default function Counter() {
     assert!(
         output
             .code
-            .contains(r#"import { signal } from "@nori/core""#),
-        "Should inject signal import when $state is used"
+            .contains(r#"import { h, signal } from "@nori/core""#),
+        "Should inject h and signal imports when markup and $state are used"
     );
     assert!(
         !output.code.contains("computed"),
@@ -539,17 +573,16 @@ export default function Counter() {
     let output = compile_source(source, CompileOptions::default()).unwrap();
 
     assert!(
-        output.code.contains("signal") && output.code.contains("computed"),
-        "Should inject both signal and computed imports"
+        output.code.contains("signal")
+            && output.code.contains("computed")
+            && output.code.contains("h("),
+        "Should inject signal, computed, and h"
     );
     assert!(
         output
             .code
-            .contains(r#"import { computed, signal } from "@nori/core""#)
-            || output
-                .code
-                .contains(r#"import { signal, computed } from "@nori/core""#),
-        "Should import both runtime symbols"
+            .contains(r#"import { computed, h, signal } from "@nori/core""#),
+        "Should import runtime symbols including h"
     );
 }
 
@@ -631,7 +664,7 @@ export default function Counter() {
             .code
             .contains("const label = count.value.toString();")
     );
-    assert!(output.code.contains("<p>{label} {count.value}</p>"));
+    assert!(output.code.contains(r#"h("p", null, () => label, " ", () => count.value)"#));
     assert!(!output.code.contains("$state<number>"));
     assert!(!output.code.contains(" as Signal"));
     assert!(!output.code.contains(" satisfies "));
@@ -643,16 +676,35 @@ fn codegen_handles_no_runtime_import_when_none_needed() {
     let source = r#"
 const greeting = "Hello";
 export default function Greet() {
-  return <p>{greeting}</p>;
+  return greeting;
 }
 "#;
     let output = compile_source(source, CompileOptions::default()).unwrap();
 
     assert!(
         !output.code.contains("@nori/core"),
-        "Should not inject runtime import when no primitives used"
+        "Should not inject runtime import when no primitives or markup used"
     );
     assert!(output.code.contains("export default function"));
+}
+
+#[test]
+fn codegen_injects_h_for_markup_without_signals() {
+    let source = r#"
+const greeting = "Hello";
+export default function Greet() {
+  return <p>{greeting}</p>;
+}
+"#;
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+
+    assert!(
+        output
+            .code
+            .contains(r#"import { h } from "@nori/core""#),
+        "Should inject h when markup is present"
+    );
+    assert!(output.code.contains(r#"h("p", null, () => greeting)"#));
 }
 
 #[test]
@@ -673,8 +725,8 @@ export default function Counter() {
     assert!(
         output
             .code
-            .contains(r#"import { effect, signal } from "@nori/core""#),
-        "Should import effect when $effect is used"
+            .contains(r#"import { effect, h, signal } from "@nori/core""#),
+        "Should import effect and h when both are used"
     );
 }
 
@@ -1050,4 +1102,225 @@ export default function App() {
     let output = compile_source(source, CompileOptions::default()).unwrap();
 
     assert!(output.code.contains("sum(1, 2, ...rest)"));
+}
+
+
+#[test]
+fn parser_recovers_after_syntax_error() {
+    let source = r#"
+const ok = 1;
+const !!! = 2;
+const alsoOk = 3;
+"#;
+    let allocator = Allocator::new();
+    let tokens = lex(source).unwrap();
+    let result = Parser::new(&allocator, source, "bad.nori".to_string(), tokens).parse_program();
+    assert!(
+        !result.diagnostics.is_empty(),
+        "expected parse diagnostics"
+    );
+    assert!(
+        result.diagnostics.iter().any(|d| d.is_error()),
+        "expected at least one error"
+    );
+    // Recovery should still produce a program with the statements that parsed.
+    assert!(
+        !result.program.body.is_empty(),
+        "expected a partial program after recovery"
+    );
+}
+
+fn normalize_js_whitespace(code: &str) -> String {
+    code.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn typescript_enum_lowers_to_object_iife() {
+    let source = include_str!("fixtures/typescript/enum_basic.nori");
+    let expected = include_str!("fixtures/typescript/enum_basic.expected.js");
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+    assert_eq!(
+        normalize_js_whitespace(&output.code),
+        normalize_js_whitespace(expected)
+    );
+}
+
+#[test]
+fn typescript_type_and_interface_are_stripped() {
+    let source = include_str!("fixtures/typescript/strip_types.nori");
+    let expected = include_str!("fixtures/typescript/strip_types.expected.js");
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+    assert_eq!(
+        normalize_js_whitespace(&output.code),
+        normalize_js_whitespace(expected)
+    );
+    assert!(!output.code.contains("type Id"));
+    assert!(!output.code.contains("interface Point"));
+}
+
+#[test]
+fn typescript_differential_corpus_matches_expected_js() {
+    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript/corpus");
+    let mut cases = 0usize;
+    let mut failures = Vec::new();
+    for entry in fs::read_dir(&corpus_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ts") {
+            continue;
+        }
+        let expected_path = path.with_extension("expected.js");
+        if !expected_path.exists() {
+            failures.push(format!("missing expected JS for {}", path.display()));
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        let expected = fs::read_to_string(&expected_path).unwrap();
+        match compile_source(
+            &source,
+            CompileOptions {
+                filename: path.display().to_string(),
+                ..CompileOptions::default()
+            },
+        ) {
+            Ok(output) => {
+                let actual = normalize_js_whitespace(&output.code);
+                let want = normalize_js_whitespace(&expected);
+                if actual != want {
+                    failures.push(format!(
+                        "mismatch for {}\n  actual:   {actual}\n  expected: {want}",
+                        path.display()
+                    ));
+                }
+            }
+            Err(err) => {
+                failures.push(format!("failed to compile {}: {err}", path.display()));
+            }
+        }
+        cases += 1;
+    }
+    assert!(
+        cases >= 3,
+        "expected at least 3 corpus .ts fixtures, found {cases}"
+    );
+    assert!(
+        failures.is_empty(),
+        "corpus differentials failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn checker_reports_assignability_errors() {
+    let result = nori::check_source("let x: string = 1;", "assign.ts").unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not assignable")),
+        "expected assignability diagnostic"
+    );
+}
+
+#[test]
+fn checker_reports_excess_property_and_return_errors() {
+    let excess = nori::check_source(
+        "interface Point { x: number }\nconst p: Point = { x: 1, y: 2 };",
+        "excess.nori",
+    )
+    .unwrap();
+    assert!(
+        excess
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("known properties") || d.message.contains("'y'")),
+        "expected excess property diagnostic: {:?}",
+        excess.diagnostics
+    );
+
+    let ret = nori::check_source("function f(): string { return 1; }", "ret.nori").unwrap();
+    assert!(
+        ret.diagnostics
+            .iter()
+            .any(|d| d.message.contains("return type")),
+        "expected return type diagnostic: {:?}",
+        ret.diagnostics
+    );
+}
+
+#[test]
+fn compile_with_type_check_surfaces_diagnostics() {
+    let output = compile_source(
+        "const x: string = 1;",
+        CompileOptions {
+            type_check: true,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(output.code.contains("const x = 1"));
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("not assignable")),
+        "expected type diagnostic in compile output: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn checker_typeof_narrowing_via_check_source() {
+    let ok = nori::check_source(
+        r#"
+let x: string | number = 1;
+if (typeof x === "string") {
+  let s: string = x;
+}
+"#,
+        "narrow.nori",
+    )
+    .unwrap();
+    assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+}
+
+#[test]
+fn checker_component_props_via_check_source() {
+    let bad = nori::check_source(
+        r#"
+function Foo(props: { bar: string }) {
+  return <div />;
+}
+const el = <Foo bar={1} />;
+"#,
+        "props.nori",
+    )
+    .unwrap();
+    assert!(
+        bad.diagnostics
+            .iter()
+            .any(|d| d.message.contains("not assignable") || d.message.contains("prop")),
+        "{:?}",
+        bad.diagnostics
+    );
+}
+
+#[test]
+fn const_enum_members_are_inlined() {
+    let source = "const enum E { A = 1, B = 2 }\nconst x = E.B;";
+    let output = compile_source(source, CompileOptions::default()).unwrap();
+    assert!(!output.code.contains("var E"));
+    assert!(output.code.contains("const x = 2"));
+}
+
+#[test]
+fn semantic_model_tracks_scopes_for_nested_lets() {
+    let allocator = Allocator::new();
+    let source = "let x = 1; { let x = 2; x; }";
+    let program = parse_source(&allocator, source, "sem.nori").unwrap();
+    let model = nori::build_semantic(&program);
+    assert_eq!(
+        model.symbols.iter().filter(|s| s.name == "x").count(),
+        2
+    );
 }

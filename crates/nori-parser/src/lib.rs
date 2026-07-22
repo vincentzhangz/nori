@@ -2,22 +2,43 @@ mod cursor;
 mod syntax;
 
 use cursor::TokenCursor;
+use nori_allocator::{Allocator, Atom, Box, Vec as ArenaVec};
 use nori_ast::{
     ArrowBody, BlockStmt, ClassAccessor, ClassConstructor, ClassDecl, ClassField, ClassMember,
-    ClassMethod, ClassStaticBlock, ClassicForStmt, Decorator, DoWhileStmt, Expr, ExprKind, ForInit,
-    ForStmt, FunctionDecl, IfStmt, MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, Param,
-    Pattern, Program, RawStmt, Span, Stmt, TryStmt, TypeErasureKind, VarDecl, VarDeclarator,
-    VarKind, WhileStmt,
+    ClassMethod, ClassStaticBlock, ClassicForStmt, Decorator, DoWhileStmt, EnumDecl, EnumMember,
+    ExportDecl, Expr, ExprKind, ForInit, ForStmt, FunctionDecl, IfStmt, InterfaceDecl,
+    MarkupAttribute, MarkupChild, MarkupElement, MarkupNode, ModuleDecl, Param, Pattern, Program,
+    RawStmt, Span, Stmt, TSFnParam, TSKeywordKind, TSLiteral, TSType, TSTypeElement, TSTypeOperator,
+    TryStmt, TypeAliasDecl, TypeErasureKind, VarDecl, VarDeclarator, VarKind, WhileStmt,
 };
-use nori_diagnostic::{NoriError, span as source_span};
+use nori_diagnostic::{Diagnostic, NoriError, span as source_span};
 use nori_lexer::{Keyword, Token, TokenKind};
 pub use syntax::Syntax;
 
-pub struct Parser {
+pub struct Parser<'a> {
+    allocator: &'a Allocator,
+    source: &'a str,
     filename: String,
     input: TokenCursor,
     syntax: Syntax,
     loop_depth: usize,
+    diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug)]
+pub struct ParseResult<'a> {
+    pub program: Program<'a>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl<'a> ParseResult<'a> {
+    pub fn into_result(self) -> Result<Program<'a>, NoriError> {
+        if let Some(diag) = self.diagnostics.into_iter().find(|d| d.is_error()) {
+            Err(diag.into())
+        } else {
+            Ok(self.program)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -29,44 +50,206 @@ struct ClassMemberModifiers {
     declaration_only: bool,
 }
 
-impl Parser {
-    pub fn new(source: &str, filename: String, tokens: Vec<Token>) -> Self {
-        Self::new_with_syntax(source, filename, tokens, Syntax::default())
+/// Parse `source` into an arena-allocated [`Program`].
+///
+/// The returned program borrows from `allocator` (and, for identifiers, from
+/// `source`), so both must outlive it.
+pub fn parse_in<'a>(
+    allocator: &'a Allocator,
+    source: &'a str,
+    filename: impl Into<String>,
+    tokens: Vec<Token>,
+) -> Result<Program<'a>, NoriError> {
+    Parser::new(allocator, source, filename.into(), tokens)
+        .parse_program()
+        .into_result()
+}
+
+/// Parse with error recovery. Always returns a (possibly partial) program plus diagnostics.
+pub fn parse_in_recovering<'a>(
+    allocator: &'a Allocator,
+    source: &'a str,
+    filename: impl Into<String>,
+    tokens: Vec<Token>,
+) -> ParseResult<'a> {
+    Parser::new(allocator, source, filename.into(), tokens).parse_program()
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(
+        allocator: &'a Allocator,
+        source: &'a str,
+        filename: String,
+        tokens: Vec<Token>,
+    ) -> Self {
+        Self::new_with_syntax(allocator, source, filename, tokens, Syntax::default())
     }
 
     pub fn new_with_syntax(
-        _source: &str,
+        allocator: &'a Allocator,
+        source: &'a str,
         filename: String,
         tokens: Vec<Token>,
         syntax: Syntax,
     ) -> Self {
         Self {
+            allocator,
+            source,
             filename,
             input: TokenCursor::new(tokens),
             syntax,
             loop_depth: 0,
+            diagnostics: Vec::new(),
         }
     }
 
-    pub fn parse_program(&mut self) -> Result<Program, NoriError> {
-        let mut body = Vec::new();
+    #[inline]
+    fn box_in<T>(&self, value: T) -> Box<'a, T> {
+        self.allocator.box_in(value)
+    }
+
+    #[inline]
+    fn new_vec<T>(&self) -> ArenaVec<'a, T> {
+        ArenaVec::new_in(self.allocator.as_bump())
+    }
+
+    #[inline]
+    fn atom(&self, s: &str) -> Atom<'a> {
+        self.allocator.atom(s)
+    }
+
+    #[inline]
+    fn lexeme_of(&self, token: &Token) -> &'a str {
+        token.lexeme(self.source)
+    }
+
+    #[inline]
+    fn owned_lexeme(&self, token: &Token) -> Atom<'a> {
+        Atom::new(self.lexeme_of(token))
+    }
+
+    #[inline]
+    fn bump_lexeme(&mut self) -> Atom<'a> {
+        let token = self.bump();
+        self.owned_lexeme(&token)
+    }
+
+    #[inline]
+    fn expect_lexeme(&mut self, kind: TokenKind, message: &str) -> Result<Atom<'a>, NoriError> {
+        let token = self.expect(kind, message)?;
+        Ok(self.owned_lexeme(&token))
+    }
+
+    #[inline]
+    fn expect_markup_lexeme(&mut self, message: &str) -> Result<Atom<'a>, NoriError> {
+        let token = self.expect_markup_ident(message)?;
+        Ok(self.owned_lexeme(&token))
+    }
+
+    pub fn parse_program(&mut self) -> ParseResult<'a> {
+        let mut body = self.new_vec();
         while !self.at(TokenKind::Eof) {
             if self.matches(TokenKind::Semicolon) {
                 continue;
             }
-            body.push(self.parse_stmt()?);
+            match self.parse_stmt() {
+                Ok(stmt) => body.push(stmt),
+                Err(err) => {
+                    self.record_error(err);
+                    self.synchronize_statement();
+                    if self.at(TokenKind::Eof) {
+                        break;
+                    }
+                }
+            }
         }
-        Ok(Program { body })
+        ParseResult {
+            program: Program { body },
+            diagnostics: std::mem::take(&mut self.diagnostics),
+        }
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt, NoriError> {
+    fn record_error(&mut self, err: NoriError) {
+        match err {
+            NoriError::Parse { message, span } => {
+                self.diagnostics.push(Diagnostic::error(message, span));
+            }
+            NoriError::Lex { message, span } => {
+                self.diagnostics.push(Diagnostic::lex_error(message, span));
+            }
+            NoriError::Io { .. } => {
+                self.diagnostics
+                    .push(Diagnostic::error(err.to_string(), source_span(0, 1)));
+            }
+        }
+    }
+
+    /// Skip tokens until a statement boundary (`;`, `}`, or a keyword that starts a statement).
+    fn synchronize_statement(&mut self) {
+        // Always consume at least one token so we cannot loop forever on the
+        // same failing statement head (e.g. `const` after a bad declarator).
+        if !self.at(TokenKind::Eof) {
+            self.bump();
+        }
+        while !self.at(TokenKind::Eof) {
+            if self.matches(TokenKind::Semicolon) {
+                return;
+            }
+            if self.at(TokenKind::RightBrace) {
+                return;
+            }
+            if self.at_any_keyword(&[
+                Keyword::Import,
+                Keyword::Export,
+                Keyword::Function,
+                Keyword::Class,
+                Keyword::Const,
+                Keyword::Let,
+                Keyword::Var,
+                Keyword::If,
+                Keyword::For,
+                Keyword::While,
+                Keyword::Do,
+                Keyword::Switch,
+                Keyword::Try,
+                Keyword::Return,
+                Keyword::Throw,
+                Keyword::Break,
+                Keyword::Continue,
+                Keyword::Debugger,
+                Keyword::With,
+                Keyword::Type,
+                Keyword::Interface,
+                Keyword::Enum,
+            ]) {
+                return;
+            }
+            self.bump();
+        }
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt<'a>, NoriError> {
         if self.at_keyword(Keyword::Import) {
             return self.parse_import();
         }
         if self.syntax.typescript
             && (self.at_keyword(Keyword::Type) || self.at_keyword(Keyword::Interface))
         {
-            return self.parse_type_only().map(Stmt::TypeOnly);
+            return self.parse_type_declaration();
+        }
+        if self.syntax.typescript
+            && self.at_keyword(Keyword::Const)
+            && self.peek_next_kind() == Some(TokenKind::Keyword(Keyword::Enum))
+        {
+            return self.parse_enum(true);
+        }
+        if self.syntax.typescript && self.at_keyword(Keyword::Enum) {
+            return self.parse_enum(false);
+        }
+        if self.syntax.typescript
+            && (self.at_contextual_ident("module") || self.at_contextual_ident("namespace"))
+        {
+            return self.parse_module();
         }
         if self.syntax.typescript
             && (self.at_keyword(Keyword::Class)
@@ -142,8 +325,67 @@ impl Parser {
         self.parse_expr_stmt()
     }
 
-    fn parse_export(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_export(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
+        // `export type ...` — erase.
+        if self.syntax.typescript
+            && (self.at_keyword(Keyword::Type)
+                || (self.at_contextual_ident("type")
+                    && matches!(
+                        self.peek_next_kind(),
+                        Some(TokenKind::Ident)
+                            | Some(TokenKind::LeftBrace)
+                            | Some(TokenKind::Keyword(_))
+                    )))
+        {
+            if self.at_keyword(Keyword::Type) || self.at_contextual_ident("type") {
+                self.bump();
+            }
+            if self.at(TokenKind::LeftBrace) {
+                // `export type { A, B }` / `export type { A } from "..."`
+                self.bump();
+                while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+                    if self.at(TokenKind::Ident)
+                        || matches!(self.peek().kind, TokenKind::Keyword(_))
+                    {
+                        self.bump();
+                    }
+                    if self.matches_contextual_ident("as")
+                        && (self.at(TokenKind::Ident)
+                            || matches!(self.peek().kind, TokenKind::Keyword(_)))
+                    {
+                        self.bump();
+                    }
+                    if !self.matches(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RightBrace, "expected `}` after export type specifiers")?;
+                if self.matches_keyword(Keyword::From) {
+                    self.expect(TokenKind::String, "expected export source")?;
+                }
+                self.consume_optional_semicolon();
+                return Ok(Stmt::Export(ExportDecl::TypeOnly(join_span(
+                    start,
+                    self.previous().span,
+                ))));
+            }
+            // `export type Foo = ...` / `export type Foo<T> = ...`
+            if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+                self.bump();
+            }
+            if self.at(TokenKind::Less) {
+                self.skip_balanced_angle_list()?;
+            }
+            if self.matches(TokenKind::Eq) {
+                self.skip_type_until(&[TokenKind::Semicolon]);
+            }
+            self.consume_optional_semicolon();
+            return Ok(Stmt::Export(ExportDecl::TypeOnly(join_span(
+                start,
+                self.previous().span,
+            ))));
+        }
         if self.matches_keyword(Keyword::Default) {
             if self.at_keyword(Keyword::Function) {
                 return self
@@ -169,7 +411,7 @@ impl Parser {
                 let generator = self.matches(TokenKind::Star);
                 let async_token = Some(start);
                 let name = if self.at(TokenKind::Ident) {
-                    Some(self.bump().lexeme)
+                    Some(self.bump_lexeme())
                 } else {
                     None
                 };
@@ -185,18 +427,22 @@ impl Parser {
                     TokenKind::RightParen,
                     "expected `)` after function parameters",
                 )?;
-                if self.matches(TokenKind::Colon) {
-                    self.skip_type_until(&[TokenKind::LeftBrace]);
-                }
+                let return_type = if self.matches(TokenKind::Colon) {
+                    let ty = self.parse_ts_type()?;
+                    Some(self.box_in(ty))
+                } else {
+                    None
+                };
                 let body = self.parse_function_body()?;
-                let span = Span::new(start.start as u32, body.span.end as u32);
+                let span = Span::new(start.start, body.span.end);
                 return Ok(Stmt::ExportDefaultFunction(FunctionDecl {
                     name,
                     params,
+                    return_type,
                     body,
                     async_token,
                     generator,
-                    decorators: Vec::new(),
+                    decorators: self.new_vec(),
                     span,
                 }));
             }
@@ -207,35 +453,49 @@ impl Parser {
         Ok(Stmt::Raw(self.parse_raw_until_semicolon()))
     }
 
-    fn parse_import(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_import(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
-        let mut specifiers = Vec::new();
+        let is_type = if self.syntax.typescript {
+            if self.matches_keyword(Keyword::Type) {
+                true
+            } else if self.at_contextual_ident("type")
+                && matches!(
+                    self.peek_next_kind(),
+                    Some(TokenKind::Ident)
+                        | Some(TokenKind::LeftBrace)
+                        | Some(TokenKind::Star)
+                        | Some(TokenKind::String)
+                )
+            {
+                self.bump();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let mut specifiers = self.new_vec();
         if self.at(TokenKind::String) {
-            let source = self.bump().lexeme;
+            let source = self.bump_lexeme();
             self.consume_optional_semicolon();
             return Ok(Stmt::Import(nori_ast::ImportDecl {
                 specifiers,
                 source,
+                is_type,
                 span: join_span(start, self.previous().span),
             }));
         }
         if self.matches(TokenKind::Star) {
             self.expect_contextual("as", "expected `as` after `*`")?;
-            let name = self
-                .expect(TokenKind::Ident, "expected namespace import name")?
-                .lexeme;
+            let name = self.expect_lexeme(TokenKind::Ident, "expected namespace import name")?;
             specifiers.push(nori_ast::ImportSpecifier::Namespace(name));
         } else if self.at(TokenKind::LeftBrace) {
             self.bump();
             while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-                let name = self
-                    .expect(TokenKind::Ident, "expected import name")?
-                    .lexeme;
+                let name = self.expect_lexeme(TokenKind::Ident, "expected import name")?;
                 let imported = if self.matches_contextual_ident("as") {
-                    Some(
-                        self.expect(TokenKind::Ident, "expected import alias")?
-                            .lexeme,
-                    )
+                    Some(self.expect_lexeme(TokenKind::Ident, "expected import alias")?)
                 } else {
                     None
                 };
@@ -252,28 +512,20 @@ impl Parser {
                 "expected `}` after import specifiers",
             )?;
         } else {
-            let name = self
-                .expect(TokenKind::Ident, "expected default import name")?
-                .lexeme;
+            let name = self.expect_lexeme(TokenKind::Ident, "expected default import name")?;
             specifiers.push(nori_ast::ImportSpecifier::Default(name));
             if self.matches(TokenKind::Comma) {
                 if self.matches(TokenKind::Star) {
                     self.expect_contextual("as", "expected `as` after `*`")?;
-                    let name = self
-                        .expect(TokenKind::Ident, "expected namespace import name")?
-                        .lexeme;
+                    let name =
+                        self.expect_lexeme(TokenKind::Ident, "expected namespace import name")?;
                     specifiers.push(nori_ast::ImportSpecifier::Namespace(name));
                 } else if self.at(TokenKind::LeftBrace) {
                     self.bump();
                     while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-                        let name = self
-                            .expect(TokenKind::Ident, "expected named import")?
-                            .lexeme;
+                        let name = self.expect_lexeme(TokenKind::Ident, "expected named import")?;
                         let imported = if self.matches_contextual_ident("as") {
-                            Some(
-                                self.expect(TokenKind::Ident, "expected import alias")?
-                                    .lexeme,
-                            )
+                            Some(self.expect_lexeme(TokenKind::Ident, "expected import alias")?)
                         } else {
                             None
                         };
@@ -293,29 +545,28 @@ impl Parser {
             }
         }
         self.expect_keyword(Keyword::From, "expected `from` in import declaration")?;
-        let source = self
-            .expect(TokenKind::String, "expected import source")?
-            .lexeme;
+        let source = self.expect_lexeme(TokenKind::String, "expected import source")?;
         self.consume_optional_semicolon();
         let span = join_span(start, self.previous().span);
         Ok(Stmt::Import(nori_ast::ImportDecl {
             specifiers,
             source,
+            is_type,
             span,
         }))
     }
 
-    fn parse_class(&mut self) -> Result<ClassDecl, NoriError> {
+    fn parse_class(&mut self) -> Result<ClassDecl<'a>, NoriError> {
         self.matches_contextual_ident("abstract");
         let class_start = self.peek().span;
-        let mut decorators = Vec::new();
+        let mut decorators = self.new_vec();
         while self.at(TokenKind::At) {
             decorators.push(self.parse_decorator()?);
         }
         self.expect_keyword(Keyword::Class, "expected `class` keyword")?;
         let start = class_start;
         self.expect(TokenKind::Ident, "expected class name")?;
-        let name = self.previous().lexeme.clone();
+        let name = self.owned_lexeme(self.previous());
         if self.at(TokenKind::Less) {
             self.skip_balanced_angle_list()?;
         }
@@ -323,7 +574,7 @@ impl Parser {
         let extends = if self.at_keyword(Keyword::Extends) {
             self.bump();
             self.expect(TokenKind::Ident, "expected parent class name")?;
-            let extends = self.previous().lexeme.clone();
+            let extends = self.owned_lexeme(self.previous());
             if self.at(TokenKind::Less) {
                 self.skip_balanced_angle_list()?;
             }
@@ -336,7 +587,7 @@ impl Parser {
         }
 
         self.expect(TokenKind::LeftBrace, "expected class body")?;
-        let mut members = Vec::new();
+        let mut members = self.new_vec();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             if self.matches(TokenKind::Semicolon) {
                 continue;
@@ -348,7 +599,7 @@ impl Parser {
         let body_end = self
             .expect(TokenKind::RightBrace, "expected `}` after class body")?
             .span;
-        let span = Span::new(start.start as u32, body_end.end as u32);
+        let span = Span::new(start.start, body_end.end);
         Ok(ClassDecl {
             name,
             extends,
@@ -358,7 +609,7 @@ impl Parser {
         })
     }
 
-    fn parse_class_member(&mut self) -> Result<Option<ClassMember>, NoriError> {
+    fn parse_class_member(&mut self) -> Result<Option<ClassMember<'a>>, NoriError> {
         while self.at(TokenKind::At) {
             self.parse_decorator()?;
         }
@@ -498,14 +749,12 @@ impl Parser {
         modifiers
     }
 
-    fn parse_decorator(&mut self) -> Result<Decorator, NoriError> {
+    fn parse_decorator(&mut self) -> Result<Decorator<'a>, NoriError> {
         let start = self.bump().span;
-        let name = self
-            .expect(TokenKind::Ident, "expected decorator name")?
-            .lexeme;
+        let name = self.expect_lexeme(TokenKind::Ident, "expected decorator name")?;
         let args = if self.at(TokenKind::LeftParen) {
             self.bump();
-            let mut args = Vec::new();
+            let mut args = self.new_vec();
             while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
                 args.push(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?);
                 if !self.matches(TokenKind::Comma) {
@@ -520,38 +769,38 @@ impl Parser {
         } else {
             None
         };
-        let span = Span::new(start.start as u32, self.previous().span.end as u32);
+        let span = Span::new(start.start, self.previous().span.end);
         Ok(Decorator { name, args, span })
     }
 
-    fn parse_class_member_name(&mut self) -> Result<(String, Option<Box<Expr>>, bool), NoriError> {
+    fn parse_class_member_name(
+        &mut self,
+    ) -> Result<(Atom<'a>, Option<Box<'a, Expr<'a>>>, bool), NoriError> {
         let is_private = self.matches(TokenKind::Hash);
 
         if self.at(TokenKind::LeftBracket) {
             self.bump();
             let expr = self.parse_expression_until(&[TokenKind::RightBracket])?;
             self.expect(TokenKind::RightBracket, "expected `]` after computed name")?;
-            Ok((String::new(), Some(Box::new(expr)), is_private))
+            Ok((self.atom(""), Some(self.box_in(expr)), is_private))
         } else {
-            let name = self
-                .expect(TokenKind::Ident, "expected class member name")?
-                .lexeme;
+            let name = self.expect_lexeme(TokenKind::Ident, "expected class member name")?;
             Ok((name, None, is_private))
         }
     }
 
-    fn parse_function(&mut self) -> Result<FunctionDecl, NoriError> {
+    fn parse_function(&mut self) -> Result<FunctionDecl<'a>, NoriError> {
         let start = self.peek().span;
         self.parse_function_with_start(start)
     }
 
-    fn parse_async_function(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_async_function(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         let async_token = Some(start);
         self.expect_keyword(Keyword::Function, "expected `function`")?;
         let generator = self.matches(TokenKind::Star);
         let name = if self.at(TokenKind::Ident) {
-            Some(self.bump().lexeme)
+            Some(self.bump_lexeme())
         } else {
             None
         };
@@ -567,28 +816,32 @@ impl Parser {
             TokenKind::RightParen,
             "expected `)` after function parameters",
         )?;
-        if self.matches(TokenKind::Colon) {
-            self.skip_type_until(&[TokenKind::LeftBrace]);
-        }
+        let return_type = if self.matches(TokenKind::Colon) {
+            let ty = self.parse_ts_type()?;
+            Some(self.box_in(ty))
+        } else {
+            None
+        };
         let body = self.parse_block()?;
-        let span = Span::new(start.start as u32, body.span.end as u32);
+        let span = Span::new(start.start, body.span.end);
         Ok(Stmt::Function(FunctionDecl {
             name,
             params,
+            return_type,
             body,
             async_token,
             generator,
-            decorators: Vec::new(),
+            decorators: self.new_vec(),
             span,
         }))
     }
 
-    fn parse_try(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_try(&mut self) -> Result<Stmt<'a>, NoriError> {
         let try_start = self.bump().span;
         let body = self.parse_block()?;
         let mut catch_param = None;
         let mut catch_body = BlockStmt {
-            body: Vec::new(),
+            body: self.new_vec(),
             span: try_start,
         };
         if self.at_keyword(Keyword::Catch) {
@@ -596,7 +849,7 @@ impl Parser {
             if self.at(TokenKind::LeftParen) {
                 self.bump();
                 if self.at(TokenKind::Ident) {
-                    catch_param = Some(self.bump().lexeme);
+                    catch_param = Some(self.bump_lexeme());
                 }
                 self.expect(TokenKind::RightParen, "expected `)` after catch param")?;
             }
@@ -613,11 +866,11 @@ impl Parser {
             catch_param,
             catch_body,
             finally_body,
-            span: Span::new(try_start.start as u32, self.previous().span.end as u32),
+            span: Span::new(try_start.start, self.previous().span.end),
         }))
     }
 
-    fn parse_for(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_for(&mut self) -> Result<Stmt<'a>, NoriError> {
         let for_start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `for`")?;
 
@@ -648,10 +901,13 @@ impl Parser {
             Some(self.parse_expression_until(&[TokenKind::RightParen])?)
         };
         self.expect(TokenKind::RightParen, "expected `)` after for clauses")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = {
+            let body = self.parse_loop_body()?;
+            self.box_in(body)
+        };
         let end = stmt_span(&body);
 
-        Ok(Stmt::ClassicFor(Box::new(ClassicForStmt {
+        Ok(Stmt::ClassicFor(self.box_in(ClassicForStmt {
             init,
             condition,
             update,
@@ -660,7 +916,7 @@ impl Parser {
         })))
     }
 
-    fn finish_for_each(&mut self, start: Span, var: VarDecl) -> Result<Stmt, NoriError> {
+    fn finish_for_each(&mut self, start: Span, var: VarDecl<'a>) -> Result<Stmt<'a>, NoriError> {
         let declarator = var
             .declarators
             .first()
@@ -677,12 +933,15 @@ impl Parser {
         };
         let iterable = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after for loop")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = {
+            let body = self.parse_loop_body()?;
+            self.box_in(body)
+        };
         let end = stmt_span(&body);
 
         Ok(Stmt::For(ForStmt {
             variable: var.kind,
-            name: declarator.name.clone(),
+            name: declarator.name,
             iterable,
             is_of,
             body,
@@ -690,7 +949,7 @@ impl Parser {
         }))
     }
 
-    fn parse_for_await(&mut self, for_span: Span) -> Result<Stmt, NoriError> {
+    fn parse_for_await(&mut self, for_span: Span) -> Result<Stmt<'a>, NoriError> {
         self.expect(TokenKind::LeftParen, "expected `(` after `for await`")?;
         let var = self.parse_var()?;
         let declarator = var
@@ -704,11 +963,14 @@ impl Parser {
         self.expect_keyword(Keyword::Of, "expected `of` in for-await loop")?;
         let iterable = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after for-await loop")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = {
+            let body = self.parse_loop_body()?;
+            self.box_in(body)
+        };
         let end = stmt_span(&body);
         Ok(Stmt::For(ForStmt {
             variable: var.kind,
-            name: declarator.name.clone(),
+            name: declarator.name,
             iterable,
             is_of: true,
             body,
@@ -716,12 +978,15 @@ impl Parser {
         }))
     }
 
-    fn parse_while(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_while(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `while`")?;
         let condition = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after while condition")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = {
+            let body = self.parse_loop_body()?;
+            self.box_in(body)
+        };
         let end = stmt_span(&body);
         Ok(Stmt::While(WhileStmt {
             condition,
@@ -730,9 +995,12 @@ impl Parser {
         }))
     }
 
-    fn parse_do_while(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_do_while(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = {
+            let body = self.parse_loop_body()?;
+            self.box_in(body)
+        };
         self.expect_keyword(Keyword::While, "expected `while` after do body")?;
         self.expect(TokenKind::LeftParen, "expected `(` after `while`")?;
         let condition = self.parse_expression_until(&[TokenKind::RightParen])?;
@@ -748,7 +1016,7 @@ impl Parser {
         }))
     }
 
-    fn parse_loop_body(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_loop_body(&mut self) -> Result<Stmt<'a>, NoriError> {
         self.loop_depth += 1;
         let body = self.parse_stmt();
         self.loop_depth = self.loop_depth.saturating_sub(1);
@@ -758,8 +1026,8 @@ impl Parser {
     fn parse_loop_control(
         &mut self,
         name: &str,
-        constructor: fn(Span) -> Stmt,
-    ) -> Result<Stmt, NoriError> {
+        constructor: fn(Span) -> Stmt<'a>,
+    ) -> Result<Stmt<'a>, NoriError> {
         if self.loop_depth == 0 {
             return Err(self.error_here(&format!("{name} is only valid inside a loop")));
         }
@@ -768,13 +1036,13 @@ impl Parser {
         Ok(constructor(span))
     }
 
-    fn parse_switch(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_switch(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `switch`")?;
         let discriminant = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after switch condition")?;
         self.expect(TokenKind::LeftBrace, "expected `{` after switch")?;
-        let mut cases = Vec::new();
+        let mut cases = self.new_vec();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             let case_start = self.peek().span;
             let test = if self.matches_keyword(Keyword::Default) {
@@ -784,7 +1052,7 @@ impl Parser {
                 Some(self.parse_expression_until(&[TokenKind::Colon])?)
             };
             self.expect(TokenKind::Colon, "expected `:` after case clause")?;
-            let mut consequent = Vec::new();
+            let mut consequent = self.new_vec();
             while !self.at(TokenKind::RightBrace)
                 && !self.at(TokenKind::Eof)
                 && !self.at_keyword(Keyword::Case)
@@ -809,7 +1077,7 @@ impl Parser {
         }))
     }
 
-    fn parse_throw(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_throw(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         let argument = self.parse_expression_until_statement_end()?;
         self.consume_optional_semicolon();
@@ -819,12 +1087,15 @@ impl Parser {
         }))
     }
 
-    fn parse_with(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_with(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `with`")?;
         let object = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after with expression")?;
-        let body = Box::new(self.parse_stmt()?);
+        let body = {
+            let body = self.parse_stmt()?;
+            self.box_in(body)
+        };
         let end = stmt_span(&body);
         Ok(Stmt::With(nori_ast::WithStmt {
             object,
@@ -833,19 +1104,22 @@ impl Parser {
         }))
     }
 
-    fn parse_label(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_label(&mut self) -> Result<Stmt<'a>, NoriError> {
         let label_token = self.bump();
         self.bump(); // colon
-        let body = Box::new(self.parse_stmt()?);
+        let body = {
+            let body = self.parse_stmt()?;
+            self.box_in(body)
+        };
         let span = join_span(label_token.span, stmt_span(&body));
         Ok(Stmt::Label(nori_ast::LabelStmt {
-            label: label_token.lexeme,
+            label: self.owned_lexeme(&label_token),
             body,
             span,
         }))
     }
 
-    fn parse_function_with_start(&mut self, start: Span) -> Result<FunctionDecl, NoriError> {
+    fn parse_function_with_start(&mut self, start: Span) -> Result<FunctionDecl<'a>, NoriError> {
         let async_token = if self.at_keyword(Keyword::Async) {
             let tok = self.bump();
             Some(tok.span)
@@ -855,7 +1129,7 @@ impl Parser {
         self.expect_keyword(Keyword::Function, "expected `function`")?;
         let generator = self.matches(TokenKind::Star);
         let name = if self.at(TokenKind::Ident) {
-            Some(self.bump().lexeme)
+            Some(self.bump_lexeme())
         } else {
             None
         };
@@ -871,48 +1145,60 @@ impl Parser {
             TokenKind::RightParen,
             "expected `)` after function parameters",
         )?;
-        if self.matches(TokenKind::Colon) {
-            self.skip_type_until(&[TokenKind::LeftBrace]);
-        }
+        let return_type = if self.matches(TokenKind::Colon) {
+            let ty = self.parse_ts_type()?;
+            Some(self.box_in(ty))
+        } else {
+            None
+        };
         let body = self.parse_function_body()?;
-        let span = Span::new(start.start as u32, body.span.end as u32);
+        let span = Span::new(start.start, body.span.end);
         Ok(FunctionDecl {
             name,
             params,
+            return_type,
             body,
             async_token,
             generator,
-            decorators: Vec::new(),
+            decorators: self.new_vec(),
             span,
         })
     }
 
-    fn parse_params(&mut self) -> Result<Vec<Param>, NoriError> {
+    fn parse_params(&mut self) -> Result<ArenaVec<'a, Param<'a>>, NoriError> {
         self.parse_params_with_properties(false)
     }
 
-    fn parse_class_params(&mut self, parameter_properties: bool) -> Result<Vec<Param>, NoriError> {
+    fn parse_class_params(
+        &mut self,
+        parameter_properties: bool,
+    ) -> Result<ArenaVec<'a, Param<'a>>, NoriError> {
         self.parse_params_with_properties(parameter_properties)
     }
 
     fn parse_params_with_properties(
         &mut self,
         parameter_properties: bool,
-    ) -> Result<Vec<Param>, NoriError> {
-        let mut params = Vec::new();
+    ) -> Result<ArenaVec<'a, Param<'a>>, NoriError> {
+        let mut params = self.new_vec();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
             self.matches(TokenKind::Ellipsis);
             let is_property =
                 parameter_properties && self.consume_constructor_parameter_property_modifiers();
             let name = if self.at(TokenKind::Ident) {
-                self.bump().lexeme
+                self.bump_lexeme()
             } else {
                 return Err(self.error_here("expected parameter name"));
             };
             self.matches(TokenKind::Question);
-            if self.matches(TokenKind::Colon) {
-                self.skip_type_until(&[TokenKind::Comma, TokenKind::Eq, TokenKind::RightParen]);
-            }
+            let type_ann = if self.matches(TokenKind::Colon) {
+                {
+                    let ty = self.parse_ts_type()?;
+                    Some(self.box_in(ty))
+                }
+            } else {
+                None
+            };
             let default = if self.matches(TokenKind::Eq) {
                 Some(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightParen])?)
             } else {
@@ -920,6 +1206,7 @@ impl Parser {
             };
             params.push(Param {
                 name,
+                type_ann,
                 default,
                 is_property,
             });
@@ -939,9 +1226,9 @@ impl Parser {
         is_property
     }
 
-    fn parse_block(&mut self) -> Result<BlockStmt, NoriError> {
+    fn parse_block(&mut self) -> Result<BlockStmt<'a>, NoriError> {
         let start = self.expect(TokenKind::LeftBrace, "expected block")?.span;
-        let mut body = Vec::new();
+        let mut body = self.new_vec();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             body.push(self.parse_stmt()?);
         }
@@ -954,7 +1241,7 @@ impl Parser {
         })
     }
 
-    fn parse_function_body(&mut self) -> Result<BlockStmt, NoriError> {
+    fn parse_function_body(&mut self) -> Result<BlockStmt<'a>, NoriError> {
         let loop_depth = self.loop_depth;
         self.loop_depth = 0;
         let body = self.parse_block();
@@ -962,7 +1249,7 @@ impl Parser {
         body
     }
 
-    fn parse_var(&mut self) -> Result<VarDecl, NoriError> {
+    fn parse_var(&mut self) -> Result<VarDecl<'a>, NoriError> {
         let kind_token = self.bump();
         let kind = match kind_token.kind {
             TokenKind::Keyword(Keyword::Const) => VarKind::Const,
@@ -970,23 +1257,28 @@ impl Parser {
             TokenKind::Keyword(Keyword::Var) => VarKind::Var,
             _ => unreachable!("caller checked keyword"),
         };
-        let mut declarators = Vec::new();
+        let mut declarators = self.new_vec();
         loop {
             let start = self.peek().span;
             let (name, pattern) =
                 if self.at(TokenKind::LeftBracket) || self.at(TokenKind::LeftBrace) {
                     let pattern = self.parse_destructuring_pattern()?;
-                    (String::new(), Some(pattern))
+                    (self.atom(""), Some(pattern))
                 } else {
                     let name_token = self.expect(TokenKind::Ident, "expected variable name")?;
-                    (name_token.lexeme, None)
+                    (self.owned_lexeme(&name_token), None)
                 };
             if name.is_empty() && self.peek().kind != TokenKind::Eq {
                 return Err(self.error_here("expected variable name or pattern"));
             }
-            if self.matches(TokenKind::Colon) {
-                self.skip_type_until(&[TokenKind::Eq, TokenKind::Comma, TokenKind::Semicolon]);
-            }
+            let type_ann = if self.matches(TokenKind::Colon) {
+                {
+                    let ty = self.parse_ts_type()?;
+                    Some(self.box_in(ty))
+                }
+            } else {
+                None
+            };
             let init = if self.matches(TokenKind::Eq) {
                 Some(self.parse_expression_until(&[TokenKind::Comma, TokenKind::Semicolon])?)
             } else {
@@ -996,6 +1288,7 @@ impl Parser {
             declarators.push(VarDeclarator {
                 name,
                 pattern,
+                type_ann,
                 init,
                 span: join_span(start, end),
             });
@@ -1017,14 +1310,14 @@ impl Parser {
         })
     }
 
-    fn parse_destructuring_pattern(&mut self) -> Result<Pattern, NoriError> {
+    fn parse_destructuring_pattern(&mut self) -> Result<Pattern<'a>, NoriError> {
         let start = self.peek().span;
         if self.at(TokenKind::LeftBracket) {
             self.bump();
-            let mut elements = Vec::new();
+            let mut elements = self.new_vec();
             while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::Ident) {
-                    elements.push(Some(Pattern::Ident(self.bump().lexeme)));
+                    elements.push(Some(Pattern::Ident(self.bump_lexeme())));
                 } else if self.at(TokenKind::Comma) {
                     self.bump();
                     elements.push(None);
@@ -1041,10 +1334,10 @@ impl Parser {
             })
         } else if self.at(TokenKind::LeftBrace) {
             self.bump();
-            let mut properties = Vec::new();
+            let mut properties = self.new_vec();
             while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::Ident) {
-                    let name = self.bump().lexeme;
+                    let name = self.bump_lexeme();
                     let default =
                         if self.matches(TokenKind::Eq) {
                             Some(self.parse_expression_until(&[
@@ -1054,11 +1347,11 @@ impl Parser {
                         } else {
                             None
                         };
-                    let span = Span::new(start.start as u32, self.previous().span.end as u32);
+                    let span = Span::new(start.start, self.previous().span.end);
                     properties.push(nori_ast::ObjectPatternProp {
-                        key: name.clone(),
+                        key: name,
                         alias: None,
-                        value: Some(Box::new(Pattern::Ident(name))),
+                        value: Some(self.box_in(Pattern::Ident(name))),
                         default,
                         span,
                     });
@@ -1080,7 +1373,7 @@ impl Parser {
         }
     }
 
-    fn parse_return(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_return(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         if self.matches(TokenKind::Semicolon) {
             return Ok(Stmt::Return(None, start));
@@ -1093,14 +1386,20 @@ impl Parser {
         Ok(Stmt::Return(Some(expr), start))
     }
 
-    fn parse_if(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_if(&mut self) -> Result<Stmt<'a>, NoriError> {
         let start = self.bump().span;
         self.expect(TokenKind::LeftParen, "expected `(` after `if`")?;
         let condition = self.parse_expression_until(&[TokenKind::RightParen])?;
         self.expect(TokenKind::RightParen, "expected `)` after if condition")?;
-        let consequent = Box::new(self.parse_stmt()?);
+        let consequent = {
+            let stmt = self.parse_stmt()?;
+            self.box_in(stmt)
+        };
         let alternate = if self.matches_keyword(Keyword::Else) {
-            Some(Box::new(self.parse_stmt()?))
+            {
+                let stmt = self.parse_stmt()?;
+                Some(self.box_in(stmt))
+            }
         } else {
             None
         };
@@ -1111,14 +1410,163 @@ impl Parser {
             condition,
             consequent,
             alternate,
-            span: Span::new(start.start, end as u32),
+            span: Span::new(start.start, end),
         }))
     }
 
-    fn parse_expr_stmt(&mut self) -> Result<Stmt, NoriError> {
+    fn parse_expr_stmt(&mut self) -> Result<Stmt<'a>, NoriError> {
         let expr = self.parse_expression_until_statement_end()?;
         self.consume_optional_semicolon();
         Ok(Stmt::Expr(expr))
+    }
+
+    fn parse_type_declaration(&mut self) -> Result<Stmt<'a>, NoriError> {
+        if self.at_keyword(Keyword::Interface) {
+            return self.parse_interface();
+        }
+        let checkpoint = self.input.checkpoint();
+        match self.try_parse_type_alias() {
+            Ok(stmt) => Ok(stmt),
+            Err(_) => {
+                self.input.rewind(checkpoint);
+                self.parse_type_only().map(Stmt::TypeOnly)
+            }
+        }
+    }
+
+    fn try_parse_type_alias(&mut self) -> Result<Stmt<'a>, NoriError> {
+        let start = self.expect_keyword(Keyword::Type, "expected `type`")?.span;
+        let name = self.expect_lexeme(TokenKind::Ident, "expected type alias name")?;
+        let mut type_params = self.new_vec();
+        if self.at(TokenKind::Less) {
+            self.bump();
+            while !self.at(TokenKind::Greater) && !self.at(TokenKind::Eof) {
+                if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+                    type_params.push(self.bump_lexeme());
+                } else {
+                    break;
+                }
+                // Skip optional constraints / defaults on type params.
+                if self.matches_keyword(Keyword::Extends) {
+                    let _ = self.parse_ts_type()?;
+                }
+                if self.matches(TokenKind::Eq) {
+                    let _ = self.parse_ts_type()?;
+                }
+                if !self.matches(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Greater, "expected `>` after type parameters")?;
+        }
+        self.expect(TokenKind::Eq, "expected `=` in type alias")?;
+        let type_ann = {
+            let ty = self.parse_ts_type()?;
+            self.box_in(ty)
+        };
+        self.consume_optional_semicolon();
+        let end = self.previous().span;
+        Ok(Stmt::TypeAlias(TypeAliasDecl {
+            name,
+            type_params,
+            type_ann,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_interface(&mut self) -> Result<Stmt<'a>, NoriError> {
+        let start = self
+            .expect_keyword(Keyword::Interface, "expected `interface`")?
+            .span;
+        let name = self.expect_lexeme(TokenKind::Ident, "expected interface name")?;
+        if self.at(TokenKind::Less) {
+            self.skip_balanced_angle_list()?;
+        }
+        let mut extends = self.new_vec();
+        if self.matches_keyword(Keyword::Extends) {
+            loop {
+                let parent = self.expect_lexeme(TokenKind::Ident, "expected interface parent")?;
+                extends.push(parent);
+                if self.at(TokenKind::Less) {
+                    self.skip_balanced_angle_list()?;
+                }
+                if !self.matches(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        let body = self.parse_ts_object_members()?;
+        let end = self.previous().span;
+        Ok(Stmt::Interface(InterfaceDecl {
+            name,
+            extends,
+            body,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_enum(&mut self, is_const: bool) -> Result<Stmt<'a>, NoriError> {
+        let start = if is_const {
+            let const_span = self
+                .expect_keyword(Keyword::Const, "expected `const`")?
+                .span;
+            self.expect_keyword(Keyword::Enum, "expected `enum`")?;
+            const_span
+        } else {
+            self.expect_keyword(Keyword::Enum, "expected `enum`")?.span
+        };
+        let name = self.expect_lexeme(TokenKind::Ident, "expected enum name")?;
+        self.expect(TokenKind::LeftBrace, "expected `{` after enum name")?;
+        let mut members = self.new_vec();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            let member_start = self.peek().span;
+            let member_name = if self.at(TokenKind::Ident)
+                || matches!(self.peek().kind, TokenKind::Keyword(_))
+                || self.at(TokenKind::String)
+            {
+                self.bump_lexeme()
+            } else {
+                return Err(self.error_here("expected enum member name"));
+            };
+            let init = if self.matches(TokenKind::Eq) {
+                Some(self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBrace])?)
+            } else {
+                None
+            };
+            let end = init.as_ref().map_or(member_start, |expr| expr.span);
+            members.push(EnumMember {
+                name: member_name,
+                init,
+                span: join_span(member_start, end),
+            });
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self
+            .expect(TokenKind::RightBrace, "expected `}` after enum body")?
+            .span;
+        Ok(Stmt::Enum(EnumDecl {
+            name,
+            is_const,
+            members,
+            span: join_span(start, end),
+        }))
+    }
+
+    fn parse_module(&mut self) -> Result<Stmt<'a>, NoriError> {
+        let start = self.bump().span; // module | namespace
+        let name = if self.at(TokenKind::String) || self.at(TokenKind::Ident) {
+            self.bump_lexeme()
+        } else {
+            return Err(self.error_here("expected module/namespace name"));
+        };
+        let body = self.parse_block()?;
+        Ok(Stmt::Module(ModuleDecl {
+            name,
+            body,
+            span: join_span(start, self.previous().span),
+        }))
     }
 
     fn parse_type_only(&mut self) -> Result<RawStmt, NoriError> {
@@ -1146,6 +1594,535 @@ impl Parser {
         })
     }
 
+    /// Pratt-style TypeScript type grammar.
+    fn parse_ts_type(&mut self) -> Result<TSType<'a>, NoriError> {
+        self.parse_ts_union()
+    }
+
+    fn parse_ts_union(&mut self) -> Result<TSType<'a>, NoriError> {
+        self.matches(TokenKind::Pipe); // leading |
+        let first = self.parse_ts_intersection()?;
+        if !self.at(TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let start = ts_type_span(&first);
+        let mut types = self.new_vec();
+        types.push(first);
+        while self.matches(TokenKind::Pipe) {
+            types.push(self.parse_ts_intersection()?);
+        }
+        let end = ts_type_span(types.last().unwrap());
+        Ok(TSType::Union(types, join_span(start, end)))
+    }
+
+    fn parse_ts_intersection(&mut self) -> Result<TSType<'a>, NoriError> {
+        self.matches(TokenKind::Ampersand); // leading &
+        let first = self.parse_ts_conditional()?;
+        if !self.at(TokenKind::Ampersand) {
+            return Ok(first);
+        }
+        let start = ts_type_span(&first);
+        let mut types = self.new_vec();
+        types.push(first);
+        while self.matches(TokenKind::Ampersand) {
+            types.push(self.parse_ts_conditional()?);
+        }
+        let end = ts_type_span(types.last().unwrap());
+        Ok(TSType::Intersection(types, join_span(start, end)))
+    }
+
+    fn parse_ts_conditional(&mut self) -> Result<TSType<'a>, NoriError> {
+        let check = self.parse_ts_postfix()?;
+        if self.matches_keyword(Keyword::Extends) {
+            let extends = self.parse_ts_postfix()?;
+            if self.matches(TokenKind::Question) {
+                let true_type = self.parse_ts_type()?;
+                self.expect(TokenKind::Colon, "expected `:` in conditional type")?;
+                let false_type = self.parse_ts_type()?;
+                let span = join_span(ts_type_span(&check), ts_type_span(&false_type));
+                return Ok(TSType::Conditional {
+                    check: self.box_in(check),
+                    extends: self.box_in(extends),
+                    true_type: self.box_in(true_type),
+                    false_type: self.box_in(false_type),
+                    span,
+                });
+            }
+            // `T extends U` without `?` — treat as intersection-like Any fallback by
+            // re-wrapping; rare in annotations. Fall through with check only.
+            let _ = extends;
+        }
+        Ok(check)
+    }
+
+    fn parse_ts_postfix(&mut self) -> Result<TSType<'a>, NoriError> {
+        let mut ty = self.parse_ts_primary()?;
+        loop {
+            if self.matches(TokenKind::LeftBracket) {
+                if self.matches(TokenKind::RightBracket) {
+                    let span = join_span(ts_type_span(&ty), self.previous().span);
+                    ty = TSType::Array(self.box_in(ty), span);
+                } else {
+                    let index = self.parse_ts_type()?;
+                    let end = self
+                        .expect(
+                            TokenKind::RightBracket,
+                            "expected `]` in indexed access type",
+                        )?
+                        .span;
+                    let span = join_span(ts_type_span(&ty), end);
+                    ty = TSType::IndexedAccess {
+                        object: self.box_in(ty),
+                        index: self.box_in(index),
+                        span,
+                    };
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(ty)
+    }
+
+    fn parse_ts_primary(&mut self) -> Result<TSType<'a>, NoriError> {
+        let start = self.peek().span;
+
+        if self.matches_keyword(Keyword::This) {
+            return Ok(TSType::This(start));
+        }
+        if self.matches_keyword(Keyword::Null) {
+            return Ok(TSType::Literal(TSLiteral::Null(start)));
+        }
+        if self.matches_keyword(Keyword::True) {
+            return Ok(TSType::Literal(TSLiteral::Bool(true, start)));
+        }
+        if self.matches_keyword(Keyword::False) {
+            return Ok(TSType::Literal(TSLiteral::Bool(false, start)));
+        }
+        if self.matches_keyword(Keyword::Void) {
+            return Ok(TSType::Keyword(TSKeywordKind::Void, start));
+        }
+        if self.matches_keyword(Keyword::Typeof) {
+            let name =
+                if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+                    self.bump_lexeme()
+                } else {
+                    self.atom("unknown")
+                };
+            return Ok(TSType::Typeof {
+                expr_name: name,
+                span: join_span(start, self.previous().span),
+            });
+        }
+        if self.at_contextual_ident("keyof") {
+            self.bump();
+            let operand = self.parse_ts_postfix()?;
+            return Ok(TSType::Operator {
+                op: TSTypeOperator::Keyof,
+                operand: self.box_in(operand),
+                span: join_span(start, self.previous().span),
+            });
+        }
+        if self.at_contextual_ident("readonly") {
+            self.bump();
+            let operand = self.parse_ts_postfix()?;
+            return Ok(TSType::Operator {
+                op: TSTypeOperator::Readonly,
+                operand: self.box_in(operand),
+                span: join_span(start, self.previous().span),
+            });
+        }
+        if self.at_contextual_ident("infer") {
+            self.bump();
+            let name = self.expect_lexeme(TokenKind::Ident, "expected infer type name")?;
+            return Ok(TSType::Infer {
+                name,
+                span: join_span(start, self.previous().span),
+            });
+        }
+        if self.at(TokenKind::String) {
+            let value = self.bump_lexeme();
+            return Ok(TSType::Literal(TSLiteral::String(value, start)));
+        }
+        if self.at(TokenKind::Number) || self.at(TokenKind::BigInt) {
+            let value = self.bump_lexeme();
+            return Ok(TSType::Literal(TSLiteral::Number(value, start)));
+        }
+        if self.at(TokenKind::LeftBrace) {
+            if self.looks_like_mapped_type() {
+                return self.parse_ts_mapped_type();
+            }
+            let members = self.parse_ts_object_members()?;
+            return Ok(TSType::Object(
+                members,
+                join_span(start, self.previous().span),
+            ));
+        }
+        if self.at(TokenKind::BackTick) {
+            return self.parse_ts_template_literal_type();
+        }
+        if self.at(TokenKind::LeftBracket) {
+            self.bump();
+            let mut elements = self.new_vec();
+            while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
+                elements.push(self.parse_ts_type()?);
+                if !self.matches(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let end = self
+                .expect(TokenKind::RightBracket, "expected `]` after tuple type")?
+                .span;
+            return Ok(TSType::Tuple(elements, join_span(start, end)));
+        }
+        if self.at(TokenKind::LeftParen) {
+            // Function type `(a: T) => U` or parenthesized `(T)`.
+            let checkpoint = self.input.checkpoint();
+            self.bump(); // (
+            let is_fn = self.looks_like_ts_function_type();
+            self.input.rewind(checkpoint);
+            if is_fn {
+                return self.parse_ts_function_type();
+            }
+            self.bump(); // (
+            let inner = self.parse_ts_type()?;
+            let end = self
+                .expect(TokenKind::RightParen, "expected `)` after type")?
+                .span;
+            return Ok(TSType::Parenthesized(
+                self.box_in(inner),
+                join_span(start, end),
+            ));
+        }
+        if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+            let name_token = self.bump();
+            let mut name = self.owned_lexeme(&name_token).as_str().to_string();
+            if let Some(keyword) = ts_keyword_kind(name.as_str()) {
+                return Ok(TSType::Keyword(keyword, name_token.span));
+            }
+            // Qualified names: `JSX.Element`, `foo.bar.Baz`
+            while self.matches(TokenKind::Dot) {
+                let part = self.expect_lexeme(
+                    TokenKind::Ident,
+                    "expected identifier after `.` in type name",
+                )?;
+                name.push('.');
+                name.push_str(part.as_str());
+            }
+            let type_args = if self.at(TokenKind::Less) {
+                Some(self.parse_ts_type_args()?)
+            } else {
+                None
+            };
+            let end = self.previous().span;
+            return Ok(TSType::Reference {
+                name: self.atom(&name),
+                type_args,
+                span: join_span(start, end),
+            });
+        }
+
+        // Fallback: skip a balanced fragment and emit Any.
+        let fallback_start = self.peek().span;
+        self.skip_type_until(&[
+            TokenKind::Semicolon,
+            TokenKind::Comma,
+            TokenKind::Eq,
+            TokenKind::RightBrace,
+            TokenKind::RightParen,
+            TokenKind::RightBracket,
+            TokenKind::Pipe,
+            TokenKind::Ampersand,
+            TokenKind::Greater,
+        ]);
+        Ok(TSType::Any(join_span(fallback_start, self.previous().span)))
+    }
+
+    fn looks_like_mapped_type(&mut self) -> bool {
+        // `{ [K in ...]: ... }` — peek without consuming.
+        let checkpoint = self.input.checkpoint();
+        if !self.matches(TokenKind::LeftBrace) {
+            self.input.rewind(checkpoint);
+            return false;
+        }
+        if !self.matches(TokenKind::LeftBracket) {
+            self.input.rewind(checkpoint);
+            return false;
+        }
+        if !(self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_))) {
+            self.input.rewind(checkpoint);
+            return false;
+        }
+        self.bump();
+        let is_mapped = self.at_keyword(Keyword::In) || self.at_contextual_ident("in");
+        self.input.rewind(checkpoint);
+        is_mapped
+    }
+
+    fn parse_ts_mapped_type(&mut self) -> Result<TSType<'a>, NoriError> {
+        let start = self.expect(TokenKind::LeftBrace, "expected `{`")?.span;
+        let readonly = self.matches_contextual_ident("readonly");
+        self.expect(TokenKind::LeftBracket, "expected `[` in mapped type")?;
+        let key = self.expect_lexeme(TokenKind::Ident, "expected mapped type key")?;
+        if self.at_keyword(Keyword::In) || self.at_contextual_ident("in") {
+            self.bump();
+        } else {
+            return Err(self.error_here("expected `in` in mapped type"));
+        }
+        let constraint = {
+            let ty = self.parse_ts_type()?;
+            self.box_in(ty)
+        };
+        self.expect(TokenKind::RightBracket, "expected `]` in mapped type")?;
+        let optional = self.matches(TokenKind::Question);
+        self.expect(TokenKind::Colon, "expected `:` in mapped type")?;
+        let type_ann = {
+            let ty = self.parse_ts_type()?;
+            self.box_in(ty)
+        };
+        let end = self
+            .expect(TokenKind::RightBrace, "expected `}` after mapped type")?
+            .span;
+        Ok(TSType::Mapped {
+            readonly,
+            key,
+            constraint,
+            optional,
+            type_ann,
+            span: join_span(start, end),
+        })
+    }
+
+    fn parse_ts_template_literal_type(&mut self) -> Result<TSType<'a>, NoriError> {
+        let start = self
+            .expect(TokenKind::BackTick, "expected template literal type")?
+            .span;
+        let mut quasis = self.new_vec();
+        let mut types = self.new_vec();
+        loop {
+            let quasi_start = self.peek().span.start;
+            while !self.at(TokenKind::Eof)
+                && !self.at(TokenKind::BackTick)
+                && !(self.at(TokenKind::Dollar)
+                    && self.peek_next_kind() == Some(TokenKind::LeftBrace))
+            {
+                self.bump();
+            }
+            let quasi_end = self.peek().span.start;
+            let quasi = if quasi_end > quasi_start {
+                self.atom(&self.source[quasi_start as usize..quasi_end as usize])
+            } else {
+                self.atom("")
+            };
+            quasis.push(quasi);
+
+            if self.at(TokenKind::BackTick) {
+                let end = self.bump().span;
+                return Ok(TSType::TemplateLiteral {
+                    quasis,
+                    types,
+                    span: join_span(start, end),
+                });
+            }
+            if self.at(TokenKind::Eof) {
+                return Err(self.error_here("unterminated template literal type"));
+            }
+            // `${`
+            self.bump(); // $
+            self.expect(TokenKind::LeftBrace, "expected `{` in template type")?;
+            types.push(self.parse_ts_type()?);
+            self.expect(
+                TokenKind::RightBrace,
+                "expected `}` after template type interpolation",
+            )?;
+        }
+    }
+
+    fn looks_like_ts_function_type(&mut self) -> bool {
+        // Cursor is just after `(`. Scan for `) =>`.
+        let mut depth = 1usize;
+        while !self.at(TokenKind::Eof) {
+            match self.bump().kind {
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self.at(TokenKind::Arrow);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn parse_ts_function_type(&mut self) -> Result<TSType<'a>, NoriError> {
+        let start = self.expect(TokenKind::LeftParen, "expected `(`")?.span;
+        let mut params = self.new_vec();
+        while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
+            let param_start = self.peek().span;
+            self.matches(TokenKind::Ellipsis);
+            let name =
+                if self.at(TokenKind::Ident) || matches!(self.peek().kind, TokenKind::Keyword(_)) {
+                    self.bump_lexeme()
+                } else {
+                    self.atom("_")
+                };
+            let optional = self.matches(TokenKind::Question);
+            let type_ann = if self.matches(TokenKind::Colon) {
+                {
+                    let ty = self.parse_ts_type()?;
+                    Some(self.box_in(ty))
+                }
+            } else {
+                None
+            };
+            params.push(TSFnParam {
+                name,
+                optional,
+                type_ann,
+                span: join_span(param_start, self.previous().span),
+            });
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(
+            TokenKind::RightParen,
+            "expected `)` after function type params",
+        )?;
+        self.expect(TokenKind::Arrow, "expected `=>` in function type")?;
+        let return_type = {
+            let ty = self.parse_ts_type()?;
+            self.box_in(ty)
+        };
+        let span = join_span(start, ts_type_span(&return_type));
+        Ok(TSType::Function {
+            params,
+            return_type,
+            span,
+        })
+    }
+
+    fn parse_ts_type_args(&mut self) -> Result<ArenaVec<'a, TSType<'a>>, NoriError> {
+        self.expect(TokenKind::Less, "expected `<`")?;
+        let mut args = self.new_vec();
+        while !self.at(TokenKind::Greater) && !self.at(TokenKind::Eof) {
+            args.push(self.parse_ts_type()?);
+            if !self.matches(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::Greater, "expected `>` after type arguments")?;
+        Ok(args)
+    }
+
+    fn parse_ts_object_members(&mut self) -> Result<ArenaVec<'a, TSTypeElement<'a>>, NoriError> {
+        self.expect(TokenKind::LeftBrace, "expected `{`")?;
+        let mut members = self.new_vec();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            let member_start = self.peek().span;
+            let readonly = self.matches_contextual_ident("readonly");
+            if self.at(TokenKind::LeftBracket) {
+                // Index signature `[key: string]: T`
+                self.bump();
+                let key_name = self.expect_lexeme(TokenKind::Ident, "expected index key name")?;
+                self.expect(TokenKind::Colon, "expected `:` in index signature")?;
+                let key_type = {
+                    let ty = self.parse_ts_type()?;
+                    self.box_in(ty)
+                };
+                self.expect(TokenKind::RightBracket, "expected `]` after index key")?;
+                self.expect(TokenKind::Colon, "expected `:` after index signature")?;
+                let type_ann = {
+                    let ty = self.parse_ts_type()?;
+                    self.box_in(ty)
+                };
+                members.push(TSTypeElement::Index {
+                    key_name,
+                    key_type,
+                    type_ann,
+                    span: join_span(member_start, self.previous().span),
+                });
+            } else {
+                let key = if self.at(TokenKind::Ident)
+                    || matches!(self.peek().kind, TokenKind::Keyword(_))
+                    || self.at(TokenKind::String)
+                {
+                    self.bump_lexeme()
+                } else {
+                    break;
+                };
+                let optional = self.matches(TokenKind::Question);
+                if self.matches(TokenKind::LeftParen) {
+                    let mut params = self.new_vec();
+                    while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
+                        let p_start = self.peek().span;
+                        let pname = if self.at(TokenKind::Ident) {
+                            self.bump_lexeme()
+                        } else {
+                            self.atom("_")
+                        };
+                        let p_optional = self.matches(TokenKind::Question);
+                        let p_type = if self.matches(TokenKind::Colon) {
+                            {
+                                let ty = self.parse_ts_type()?;
+                                Some(self.box_in(ty))
+                            }
+                        } else {
+                            None
+                        };
+                        params.push(TSFnParam {
+                            name: pname,
+                            optional: p_optional,
+                            type_ann: p_type,
+                            span: join_span(p_start, self.previous().span),
+                        });
+                        if !self.matches(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RightParen, "expected `)` after method params")?;
+                    let return_type = if self.matches(TokenKind::Colon) {
+                        {
+                            let ty = self.parse_ts_type()?;
+                            Some(self.box_in(ty))
+                        }
+                    } else {
+                        None
+                    };
+                    members.push(TSTypeElement::Method {
+                        key,
+                        optional,
+                        params,
+                        return_type,
+                        span: join_span(member_start, self.previous().span),
+                    });
+                } else {
+                    let type_ann = if self.matches(TokenKind::Colon) {
+                        {
+                            let ty = self.parse_ts_type()?;
+                            Some(self.box_in(ty))
+                        }
+                    } else {
+                        None
+                    };
+                    members.push(TSTypeElement::Property {
+                        key,
+                        optional,
+                        readonly,
+                        type_ann,
+                        span: join_span(member_start, self.previous().span),
+                    });
+                }
+            }
+            self.matches(TokenKind::Comma);
+            self.matches(TokenKind::Semicolon);
+        }
+        self.expect(TokenKind::RightBrace, "expected `}` after type members")?;
+        Ok(members)
+    }
+
     fn parse_raw_until_semicolon(&mut self) -> RawStmt {
         let start = self.bump().span;
         while !self.at(TokenKind::Semicolon) && !self.at(TokenKind::Eof) {
@@ -1158,11 +2135,11 @@ impl Parser {
         }
     }
 
-    fn parse_expression_until_statement_end(&mut self) -> Result<Expr, NoriError> {
+    fn parse_expression_until_statement_end(&mut self) -> Result<Expr<'a>, NoriError> {
         self.parse_expression_until(&[TokenKind::Semicolon, TokenKind::RightBrace])
     }
 
-    fn parse_expression_until(&mut self, stop: &[TokenKind]) -> Result<Expr, NoriError> {
+    fn parse_expression_until(&mut self, stop: &[TokenKind]) -> Result<Expr<'a>, NoriError> {
         self.parse_expression_until_bp(stop, 0)
     }
 
@@ -1170,7 +2147,7 @@ impl Parser {
         &mut self,
         stop: &[TokenKind],
         min_bp: u8,
-    ) -> Result<Expr, NoriError> {
+    ) -> Result<Expr<'a>, NoriError> {
         let mut lhs = self.parse_prefix(stop)?;
 
         loop {
@@ -1186,9 +2163,9 @@ impl Parser {
                 let span = join_span(lhs.span, alternate.span);
                 lhs = Expr {
                     kind: ExprKind::Conditional {
-                        test: Box::new(lhs),
-                        consequent: Box::new(consequent),
-                        alternate: Box::new(alternate),
+                        test: self.box_in(lhs),
+                        consequent: self.box_in(consequent),
+                        alternate: self.box_in(alternate),
                     },
                     span,
                 };
@@ -1214,9 +2191,9 @@ impl Parser {
                 let span = join_span(lhs.span, rhs.span);
                 lhs = Expr {
                     kind: ExprKind::Assign {
-                        left: Box::new(lhs),
-                        op: op.to_string(),
-                        right: Box::new(rhs),
+                        left: self.box_in(lhs),
+                        op: self.atom(op),
+                        right: self.box_in(rhs),
                     },
                     span,
                 };
@@ -1234,9 +2211,9 @@ impl Parser {
             let span = join_span(lhs.span, rhs.span);
             lhs = Expr {
                 kind: ExprKind::Binary {
-                    left: Box::new(lhs),
-                    op: op.to_string(),
-                    right: Box::new(rhs),
+                    left: self.box_in(lhs),
+                    op: self.atom(op),
+                    right: self.box_in(rhs),
                 },
                 span,
             };
@@ -1245,7 +2222,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_prefix(&mut self, stop: &[TokenKind]) -> Result<Expr, NoriError> {
+    fn parse_prefix(&mut self, stop: &[TokenKind]) -> Result<Expr<'a>, NoriError> {
         if self.at_any(stop) || self.at(TokenKind::Eof) {
             return Err(self.error_here("expected expression"));
         }
@@ -1262,24 +2239,28 @@ impl Parser {
                     };
                     Expr {
                         kind: ExprKind::Arrow {
-                            params: vec![token.lexeme],
+                            params: {
+                                let mut p = self.new_vec();
+                                p.push(self.owned_lexeme(&token));
+                                p
+                            },
                             body,
                         },
                         span,
                     }
                 } else {
                     Expr {
-                        kind: ExprKind::Ident(token.lexeme),
+                        kind: ExprKind::Ident(self.owned_lexeme(&token)),
                         span: token.span,
                     }
                 }
             }
             TokenKind::Number => Expr {
-                kind: ExprKind::Number(token.lexeme),
+                kind: ExprKind::Number(self.owned_lexeme(&token)),
                 span: token.span,
             },
             TokenKind::String => Expr {
-                kind: ExprKind::String(token.lexeme),
+                kind: ExprKind::String(self.owned_lexeme(&token)),
                 span: token.span,
             },
             TokenKind::Keyword(Keyword::True) => Expr {
@@ -1295,7 +2276,7 @@ impl Parser {
                 span: token.span,
             },
             TokenKind::Keyword(Keyword::Super) => Expr {
-                kind: ExprKind::Ident(token.lexeme),
+                kind: ExprKind::Ident(self.owned_lexeme(&token)),
                 span: token.span,
             },
             TokenKind::Keyword(Keyword::This) => Expr {
@@ -1304,13 +2285,12 @@ impl Parser {
             },
             TokenKind::Keyword(Keyword::New) => {
                 if self.matches(TokenKind::Dot) {
-                    let prop = self
-                        .expect(TokenKind::Ident, "expected `target` after `new.`")?
-                        .lexeme;
+                    let prop =
+                        self.expect_lexeme(TokenKind::Ident, "expected `target` after `new.`")?;
                     let span = join_span(token.span, self.previous().span);
                     Expr {
                         kind: ExprKind::MetaProperty {
-                            meta: "new".to_string(),
+                            meta: self.atom("new"),
                             property: prop,
                         },
                         span,
@@ -1325,7 +2305,7 @@ impl Parser {
                     let span = join_span(token.span, end);
                     Expr {
                         kind: ExprKind::New {
-                            callee: Box::new(callee),
+                            callee: self.box_in(callee),
                             args,
                         },
                         span,
@@ -1336,7 +2316,7 @@ impl Parser {
                 let rhs = self.parse_expression_until_bp(stop, 15)?;
                 let span = join_span(token.span, rhs.span);
                 Expr {
-                    kind: ExprKind::Delete(Box::new(rhs)),
+                    kind: ExprKind::Delete(self.box_in(rhs)),
                     span,
                 }
             }
@@ -1344,7 +2324,7 @@ impl Parser {
                 let rhs = self.parse_expression_until_bp(stop, 15)?;
                 let span = join_span(token.span, rhs.span);
                 Expr {
-                    kind: ExprKind::Void(Box::new(rhs)),
+                    kind: ExprKind::Void(self.box_in(rhs)),
                     span,
                 }
             }
@@ -1352,7 +2332,7 @@ impl Parser {
                 let rhs = self.parse_expression_until_bp(stop, 15)?;
                 let span = join_span(token.span, rhs.span);
                 Expr {
-                    kind: ExprKind::Typeof(Box::new(rhs)),
+                    kind: ExprKind::Typeof(self.box_in(rhs)),
                     span,
                 }
             }
@@ -1371,7 +2351,10 @@ impl Parser {
                 {
                     None
                 } else {
-                    Some(Box::new(self.parse_expression_until_bp(stop, 2)?))
+                    {
+                        let e = self.parse_expression_until_bp(stop, 2)?;
+                        Some(self.box_in(e))
+                    }
                 };
                 let span = join_span(token.span, value.as_ref().map_or(token.span, |v| v.span));
                 Expr {
@@ -1380,18 +2363,17 @@ impl Parser {
                 }
             }
             TokenKind::BigInt => Expr {
-                kind: ExprKind::BigInt(token.lexeme),
+                kind: ExprKind::BigInt(self.owned_lexeme(&token)),
                 span: token.span,
             },
             TokenKind::Keyword(Keyword::Import) if self.at(TokenKind::Dot) => {
                 self.bump();
-                let prop = self
-                    .expect(TokenKind::Ident, "expected `meta` after `import.`")?
-                    .lexeme;
+                let prop =
+                    self.expect_lexeme(TokenKind::Ident, "expected `meta` after `import.`")?;
                 let span = join_span(token.span, self.previous().span);
                 Expr {
                     kind: ExprKind::MetaProperty {
-                        meta: "import".to_string(),
+                        meta: self.atom("import"),
                         property: prop,
                     },
                     span,
@@ -1405,7 +2387,7 @@ impl Parser {
                     .span;
                 let span = join_span(token.span, end);
                 Expr {
-                    kind: ExprKind::Import(Box::new(arg)),
+                    kind: ExprKind::Import(self.box_in(arg)),
                     span,
                 }
             }
@@ -1414,8 +2396,8 @@ impl Parser {
                 let span = join_span(token.span, rhs.span);
                 Expr {
                     kind: ExprKind::Unary {
-                        op: token.lexeme,
-                        expr: Box::new(rhs),
+                        op: self.owned_lexeme(&token),
+                        expr: self.box_in(rhs),
                     },
                     span,
                 }
@@ -1425,8 +2407,8 @@ impl Parser {
                 let span = join_span(token.span, rhs.span);
                 Expr {
                     kind: ExprKind::Update {
-                        op: token.lexeme,
-                        expr: Box::new(rhs),
+                        op: self.owned_lexeme(&token),
+                        expr: self.box_in(rhs),
                         prefix: true,
                     },
                     span,
@@ -1473,7 +2455,7 @@ impl Parser {
                 let rhs = self.parse_expression_until_bp(stop, 15)?;
                 let span = join_span(token.span, rhs.span);
                 Expr {
-                    kind: ExprKind::Await(Box::new(rhs)),
+                    kind: ExprKind::Await(self.box_in(rhs)),
                     span,
                 }
             }
@@ -1487,7 +2469,11 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_postfix(&mut self, mut expr: Expr, stop: &[TokenKind]) -> Result<Expr, NoriError> {
+    fn parse_postfix(
+        &mut self,
+        mut expr: Expr<'a>,
+        stop: &[TokenKind],
+    ) -> Result<Expr<'a>, NoriError> {
         loop {
             if self.at_any(stop) || self.at(TokenKind::Eof) {
                 break;
@@ -1498,8 +2484,8 @@ impl Parser {
                 let span = join_span(expr.span, prop.span);
                 expr = Expr {
                     kind: ExprKind::Member {
-                        object: Box::new(expr),
-                        property: prop.lexeme,
+                        object: self.box_in(expr),
+                        property: self.owned_lexeme(&prop),
                         optional,
                     },
                     span,
@@ -1516,8 +2502,8 @@ impl Parser {
                     let span = join_span(expr.span, end);
                     expr = Expr {
                         kind: ExprKind::Index {
-                            object: Box::new(expr),
-                            index: Box::new(index),
+                            object: self.box_in(expr),
+                            index: self.box_in(index),
                             optional: true,
                         },
                         span,
@@ -1533,7 +2519,7 @@ impl Parser {
                     let span = join_span(expr.span, end);
                     expr = Expr {
                         kind: ExprKind::Call {
-                            callee: Box::new(expr),
+                            callee: self.box_in(expr),
                             args,
                             optional: true,
                         },
@@ -1545,8 +2531,8 @@ impl Parser {
                 let span = join_span(expr.span, prop.span);
                 expr = Expr {
                     kind: ExprKind::Member {
-                        object: Box::new(expr),
-                        property: prop.lexeme,
+                        object: self.box_in(expr),
+                        property: self.owned_lexeme(&prop),
                         optional: true,
                     },
                     span,
@@ -1561,8 +2547,8 @@ impl Parser {
                 let span = join_span(expr.span, end);
                 expr = Expr {
                     kind: ExprKind::Index {
-                        object: Box::new(expr),
-                        index: Box::new(index),
+                        object: self.box_in(expr),
+                        index: self.box_in(index),
                         optional: false,
                     },
                     span,
@@ -1577,7 +2563,7 @@ impl Parser {
                 let span = join_span(expr.span, end);
                 expr = Expr {
                     kind: ExprKind::Call {
-                        callee: Box::new(expr),
+                        callee: self.box_in(expr),
                         args,
                         optional: false,
                     },
@@ -1597,7 +2583,7 @@ impl Parser {
                 expr = Expr {
                     kind: ExprKind::TypeErasure {
                         kind: TypeErasureKind::NonNull,
-                        expr: Box::new(expr),
+                        expr: self.box_in(expr),
                     },
                     span,
                 };
@@ -1608,8 +2594,8 @@ impl Parser {
                 let span = join_span(expr.span, update.span);
                 expr = Expr {
                     kind: ExprKind::Update {
-                        op: update.lexeme,
-                        expr: Box::new(expr),
+                        op: self.owned_lexeme(&update),
+                        expr: self.box_in(expr),
                         prefix: false,
                     },
                     span,
@@ -1623,33 +2609,33 @@ impl Parser {
 
     fn parse_type_erasure(
         &mut self,
-        expr: Expr,
+        expr: Expr<'a>,
         kind: TypeErasureKind,
         stop: &[TokenKind],
-    ) -> Expr {
+    ) -> Expr<'a> {
         self.bump();
         self.skip_type_until_expression_boundary(stop);
         let span = join_span(expr.span, self.previous().span);
         Expr {
             kind: ExprKind::TypeErasure {
                 kind,
-                expr: Box::new(expr),
+                expr: self.box_in(expr),
             },
             span,
         }
     }
 
-    fn parse_arrow_body(&mut self, stop: &[TokenKind]) -> Result<ArrowBody, NoriError> {
+    fn parse_arrow_body(&mut self, stop: &[TokenKind]) -> Result<ArrowBody<'a>, NoriError> {
         if self.at(TokenKind::LeftBrace) {
             let block = self.parse_block()?;
             Ok(ArrowBody::Block(block))
         } else {
             let expr = self.parse_expression_until(stop)?;
-            Ok(ArrowBody::Expression(Box::new(expr)))
+            Ok(ArrowBody::Expression(self.box_in(expr)))
         }
     }
 
-    fn parse_new_callee(&mut self, stop: &[TokenKind]) -> Result<Expr, NoriError> {
+    fn parse_new_callee(&mut self, stop: &[TokenKind]) -> Result<Expr<'a>, NoriError> {
         let mut expr = self.parse_prefix(stop)?;
         loop {
             if self.at_any(stop)
@@ -1669,8 +2655,8 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_args(&mut self) -> Result<Vec<Expr>, NoriError> {
-        let mut args = Vec::new();
+    fn parse_args(&mut self) -> Result<ArenaVec<'a, Expr<'a>>, NoriError> {
+        let mut args = self.new_vec();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
             if self.matches(TokenKind::Ellipsis) {
                 let expr =
@@ -1678,7 +2664,7 @@ impl Parser {
                 let span = expr.span;
                 args.push(Expr {
                     kind: ExprKind::Spread {
-                        expr: Box::new(expr),
+                        expr: self.box_in(expr),
                     },
                     span,
                 });
@@ -1692,8 +2678,8 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_array(&mut self, start: Span, _stop: &[TokenKind]) -> Result<Expr, NoriError> {
-        let mut items = Vec::new();
+    fn parse_array(&mut self, start: Span, _stop: &[TokenKind]) -> Result<Expr<'a>, NoriError> {
+        let mut items = self.new_vec();
         while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
             if self.matches(TokenKind::Ellipsis) {
                 let expr =
@@ -1701,7 +2687,7 @@ impl Parser {
                 let span = expr.span;
                 items.push(Expr {
                     kind: ExprKind::Spread {
-                        expr: Box::new(expr),
+                        expr: self.box_in(expr),
                     },
                     span,
                 });
@@ -1723,8 +2709,8 @@ impl Parser {
         })
     }
 
-    fn parse_object_raw(&mut self, start: Span) -> Result<Expr, NoriError> {
-        let mut properties = Vec::new();
+    fn parse_object_raw(&mut self, start: Span) -> Result<Expr<'a>, NoriError> {
+        let mut properties = self.new_vec();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             if self.matches(TokenKind::Comma) {
                 continue;
@@ -1735,10 +2721,10 @@ impl Parser {
                     self.parse_expression_until(&[TokenKind::Comma, TokenKind::RightBrace])?;
                 let span = join_span(self.previous().span, expr.span);
                 properties.push(nori_ast::ObjectProperty {
-                    key: nori_ast::PropertyKey::Ident(String::new()),
+                    key: nori_ast::PropertyKey::Ident(self.atom("")),
                     value: Expr {
                         kind: ExprKind::Spread {
-                            expr: Box::new(expr),
+                            expr: self.box_in(expr),
                         },
                         span,
                     },
@@ -1758,19 +2744,19 @@ impl Parser {
                 let expr = self.parse_expression_until(&[TokenKind::RightBracket])?;
                 self.expect(TokenKind::RightBracket, "expected `]`")?;
                 (
-                    nori_ast::PropertyKey::Computed(Box::new(expr)),
+                    nori_ast::PropertyKey::Computed(self.box_in(expr)),
                     true,
-                    String::new(),
+                    self.atom(""),
                 )
             } else if self.at(TokenKind::String) {
-                let s = self.bump().lexeme;
-                (nori_ast::PropertyKey::String(s.clone()), false, s)
+                let s = self.bump_lexeme();
+                (nori_ast::PropertyKey::String(s), false, s)
             } else if self.at(TokenKind::Number) {
-                let n = self.bump().lexeme;
-                (nori_ast::PropertyKey::Number(n.clone()), false, n)
+                let n = self.bump_lexeme();
+                (nori_ast::PropertyKey::Number(n), false, n)
             } else if self.at(TokenKind::Ident) {
-                let n = self.bump().lexeme;
-                (nori_ast::PropertyKey::Ident(n.clone()), false, n)
+                let n = self.bump_lexeme();
+                (nori_ast::PropertyKey::Ident(n), false, n)
             } else {
                 break;
             };
@@ -1812,7 +2798,7 @@ impl Parser {
         })
     }
 
-    fn parse_markup_after_less(&mut self, start: Span) -> Result<Expr, NoriError> {
+    fn parse_markup_after_less(&mut self, start: Span) -> Result<Expr<'a>, NoriError> {
         let node = if self.matches(TokenKind::Greater) {
             let children = self.parse_markup_children(None)?;
             let end = self.expect_fragment_close()?;
@@ -1833,9 +2819,12 @@ impl Parser {
         })
     }
 
-    fn parse_markup_element_after_less(&mut self, start: Span) -> Result<MarkupElement, NoriError> {
+    fn parse_markup_element_after_less(
+        &mut self,
+        start: Span,
+    ) -> Result<MarkupElement<'a>, NoriError> {
         let name = self.parse_markup_name()?;
-        let mut attributes = Vec::new();
+        let mut attributes = self.new_vec();
         while !self.at(TokenKind::Greater)
             && !self.at(TokenKind::SlashGreater)
             && !self.at(TokenKind::Eof)
@@ -1847,13 +2836,13 @@ impl Parser {
             return Ok(MarkupElement {
                 name,
                 attributes,
-                children: Vec::new(),
+                children: self.new_vec(),
                 self_closing: true,
                 span: join_span(start, end),
             });
         }
         self.expect(TokenKind::Greater, "expected `>` after markup opening tag")?;
-        let children = self.parse_markup_children(Some(&name))?;
+        let children = self.parse_markup_children(Some(name.as_str()))?;
         let end = self.expect_markup_close(&name)?;
         Ok(MarkupElement {
             name,
@@ -1867,8 +2856,8 @@ impl Parser {
     fn parse_markup_children(
         &mut self,
         closing_name: Option<&str>,
-    ) -> Result<Vec<MarkupChild>, NoriError> {
-        let mut children = Vec::new();
+    ) -> Result<ArenaVec<'a, MarkupChild<'a>>, NoriError> {
+        let mut children = self.new_vec();
         loop {
             if self.at(TokenKind::Eof) {
                 return Err(self.error_here("unterminated markup element"));
@@ -1884,9 +2873,8 @@ impl Parser {
             }
             if self.at(TokenKind::MarkupText) {
                 let token = self.bump();
-                if !token.lexeme.trim().is_empty() {
-                    children.push(MarkupChild::Text(token.lexeme, token.span));
-                }
+                let text = self.owned_lexeme(&token);
+                children.push(MarkupChild::Text(text, token.span));
                 continue;
             }
             if self.matches(TokenKind::LeftBrace) {
@@ -1920,7 +2908,7 @@ impl Parser {
         Ok(children)
     }
 
-    fn parse_markup_attribute(&mut self) -> Result<MarkupAttribute, NoriError> {
+    fn parse_markup_attribute(&mut self) -> Result<MarkupAttribute<'a>, NoriError> {
         if self.matches(TokenKind::LeftBrace) {
             let start = self.previous().span;
             self.expect(
@@ -1941,7 +2929,7 @@ impl Parser {
             if self.at(TokenKind::String) {
                 let token = self.bump();
                 Some(Expr {
-                    kind: ExprKind::String(token.lexeme),
+                    kind: ExprKind::String(self.owned_lexeme(&token)),
                     span: token.span,
                 })
             } else if self.matches(TokenKind::LeftBrace) {
@@ -1961,23 +2949,26 @@ impl Parser {
             join_span(name_token.span, expr.span)
         });
         Ok(MarkupAttribute::Named {
-            name: name_token.lexeme,
+            name: self.owned_lexeme(&name_token),
             value,
             span,
         })
     }
 
-    fn parse_markup_name(&mut self) -> Result<String, NoriError> {
-        let mut name = self.expect_markup_ident("expected markup tag name")?.lexeme;
+    fn parse_markup_name(&mut self) -> Result<Atom<'a>, NoriError> {
+        let first = self.expect_markup_lexeme("expected markup tag name")?;
+        if !self.at(TokenKind::Dot) {
+            return Ok(first);
+        }
+        let mut name = first.as_str().to_string();
         while self.matches(TokenKind::Dot) {
             name.push('.');
             name.push_str(
-                &self
-                    .expect_markup_ident("expected markup member name")?
-                    .lexeme,
+                self.expect_markup_lexeme("expected markup member name")?
+                    .as_str(),
             );
         }
-        Ok(name)
+        Ok(self.atom(&name))
     }
 
     fn expect_markup_close(&mut self, name: &str) -> Result<Span, NoriError> {
@@ -2004,7 +2995,7 @@ impl Parser {
         .map(|token| token.span)
     }
 
-    fn parse_raw_expression_from(&mut self, start: Span, stop: &[TokenKind]) -> Expr {
+    fn parse_raw_expression_from(&mut self, start: Span, stop: &[TokenKind]) -> Expr<'a> {
         while !self.at_any(stop) && !self.at(TokenKind::Eof) {
             self.bump();
         }
@@ -2044,13 +3035,11 @@ impl Parser {
         }
     }
 
-    fn collect_arrow_params(&mut self) -> Result<Vec<String>, NoriError> {
-        let mut params = Vec::new();
+    fn collect_arrow_params(&mut self) -> Result<ArenaVec<'a, Atom<'a>>, NoriError> {
+        let mut params = self.new_vec();
         while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
             self.matches(TokenKind::Ellipsis);
-            let name = self
-                .expect(TokenKind::Ident, "expected arrow parameter")?
-                .lexeme;
+            let name = self.expect_lexeme(TokenKind::Ident, "expected arrow parameter")?;
             if self.matches(TokenKind::Colon) {
                 self.skip_type_until(&[TokenKind::Comma, TokenKind::RightParen]);
             }
@@ -2209,7 +3198,7 @@ impl Parser {
     }
 
     fn at_contextual_ident(&self, name: &str) -> bool {
-        self.at(TokenKind::Ident) && self.peek().lexeme == name
+        self.at(TokenKind::Ident) && self.lexeme_of(self.peek()) == name
     }
 
     fn at_any_contextual_ident(&self, names: &[&str]) -> bool {
@@ -2303,9 +3292,14 @@ fn stmt_span(stmt: &Stmt) -> Span {
             nori_ast::ExportDecl::Named { span, .. } | nori_ast::ExportDecl::All { span, .. } => {
                 *span
             }
+            nori_ast::ExportDecl::TypeOnly(span) => *span,
             nori_ast::ExportDecl::Declaration(stmt) => stmt_span(stmt),
         },
         Stmt::TypeOnly(raw) | Stmt::Raw(raw) => raw.span,
+        Stmt::TypeAlias(alias) => alias.span,
+        Stmt::Interface(iface) => iface.span,
+        Stmt::Enum(enum_decl) => enum_decl.span,
+        Stmt::Module(module) => module.span,
         Stmt::Var(var) => var.span,
         Stmt::Function(function) | Stmt::ExportDefaultFunction(function) => function.span,
         Stmt::ExportDefaultExpr(expr) | Stmt::Expr(expr) => expr.span,
@@ -2328,7 +3322,54 @@ fn stmt_span(stmt: &Stmt) -> Span {
 }
 
 fn join_span(start: Span, end: Span) -> Span {
-    Span::new(start.start as u32, end.end as u32)
+    Span::new(start.start, end.end)
+}
+
+fn ts_type_span(ty: &TSType<'_>) -> Span {
+    match ty {
+        TSType::Keyword(_, span)
+        | TSType::Reference { span, .. }
+        | TSType::Union(_, span)
+        | TSType::Intersection(_, span)
+        | TSType::Array(_, span)
+        | TSType::Tuple(_, span)
+        | TSType::Object(_, span)
+        | TSType::Function { span, .. }
+        | TSType::Conditional { span, .. }
+        | TSType::Infer { span, .. }
+        | TSType::Typeof { span, .. }
+        | TSType::IndexedAccess { span, .. }
+        | TSType::Operator { span, .. }
+        | TSType::Mapped { span, .. }
+        | TSType::TemplateLiteral { span, .. }
+        | TSType::Parenthesized(_, span)
+        | TSType::This(span)
+        | TSType::Any(span) => *span,
+        TSType::Literal(lit) => match lit {
+            TSLiteral::String(_, span)
+            | TSLiteral::Number(_, span)
+            | TSLiteral::Bool(_, span)
+            | TSLiteral::Null(span) => *span,
+        },
+    }
+}
+
+fn ts_keyword_kind(name: &str) -> Option<TSKeywordKind> {
+    Some(match name {
+        "any" => TSKeywordKind::Any,
+        "unknown" => TSKeywordKind::Unknown,
+        "never" => TSKeywordKind::Never,
+        "string" => TSKeywordKind::String,
+        "number" => TSKeywordKind::Number,
+        "boolean" => TSKeywordKind::Boolean,
+        "symbol" => TSKeywordKind::Symbol,
+        "bigint" => TSKeywordKind::Bigint,
+        "object" => TSKeywordKind::Object,
+        "void" => TSKeywordKind::Void,
+        "undefined" => TSKeywordKind::Undefined,
+        "null" => TSKeywordKind::Null,
+        _ => return None,
+    })
 }
 
 fn assignment_op(kind: TokenKind) -> Option<&'static str> {

@@ -7,3 +7,4 @@ license = "MIT"
 
 [dependencies]
 nori-span = { path = "../nori-span" }
+nori-allocator = { path = "../nori-allocator" }

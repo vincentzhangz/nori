@@ -17,10 +17,7 @@ impl Span {
 
     #[inline]
     pub const fn empty(at: u32) -> Self {
-        Self {
-            start: at,
-            end: at,
-        }
+        Self { start: at, end: at }
     }
 
     #[inline]
@@ -48,7 +45,7 @@ impl Span {
 
     /// Slice `source` by this span. Panics if out of bounds.
     #[inline]
-    pub fn source_text<'a>(self, source: &'a str) -> &'a str {
+    pub fn source_text(self, source: &str) -> &str {
         let (start, end) = self.as_usize();
         &source[start..end]
     }
@@ -115,18 +112,9 @@ mod tests {
     #[test]
     fn source_map_tracks_lines() {
         let map = SourceMap::new("a\nbc\n");
-        assert_eq!(
-            map.position(0),
-            SourcePosition { line: 1, column: 1 }
-        );
-        assert_eq!(
-            map.position(2),
-            SourcePosition { line: 2, column: 1 }
-        );
-        assert_eq!(
-            map.position(3),
-            SourcePosition { line: 2, column: 2 }
-        );
+        assert_eq!(map.position(0), SourcePosition { line: 1, column: 1 });
+        assert_eq!(map.position(2), SourcePosition { line: 2, column: 1 });
+        assert_eq!(map.position(3), SourcePosition { line: 2, column: 2 });
     }
 
     #[test]

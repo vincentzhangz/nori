@@ -1,11 +1,37 @@
 use nori_ast::Span;
 use nori_diagnostic::{NoriError, span as source_span};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
-    pub lexeme: String,
     pub span: Span,
+}
+
+impl Token {
+    /// Slice the token text from the original source (zero-copy).
+    #[inline]
+    pub fn lexeme<'a>(&self, source: &'a str) -> &'a str {
+        self.span.source_text(source)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriviaKind {
+    LineComment,
+    BlockComment,
+}
+
+/// Source comment range skipped during lexing. Slice text via [`Span::source_text`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trivia {
+    pub kind: TriviaKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexOutput {
+    pub tokens: Vec<Token>,
+    pub trivia: Vec<Trivia>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +62,7 @@ pub enum Keyword {
     Await,
     Type,
     Interface,
+    Enum,
     Class,
     Extends,
     True,
@@ -145,11 +172,15 @@ pub enum LexContext {
 }
 
 pub fn lex(source: &str) -> Result<Vec<Token>, NoriError> {
-    Lexer::new(source, LexContext::Normal).lex()
+    Ok(lex_with_trivia(source, LexContext::Normal)?.tokens)
 }
 
 pub fn lex_with_context(source: &str, context: LexContext) -> Result<Vec<Token>, NoriError> {
-    Lexer::new(source, context).lex()
+    Ok(lex_with_trivia(source, context)?.tokens)
+}
+
+pub fn lex_with_trivia(source: &str, context: LexContext) -> Result<LexOutput, NoriError> {
+    Lexer::new(source, context).lex_with_trivia()
 }
 
 struct Lexer<'a> {
@@ -161,6 +192,7 @@ struct Lexer<'a> {
     markup_depth: usize,
     pending_closing_tag: bool,
     context: LexContext,
+    trivia: Vec<Trivia>,
 }
 
 impl<'a> Lexer<'a> {
@@ -174,10 +206,11 @@ impl<'a> Lexer<'a> {
             markup_depth: 0,
             pending_closing_tag: false,
             context,
+            trivia: Vec::new(),
         }
     }
 
-    fn lex(mut self) -> Result<Vec<Token>, NoriError> {
+    fn lex_with_trivia(mut self) -> Result<LexOutput, NoriError> {
         if self.source.starts_with("#!") {
             while !matches!(self.peek(), None | Some('\n')) {
                 self.advance();
@@ -201,7 +234,10 @@ impl<'a> Lexer<'a> {
         }
 
         tokens.push(self.make_token(TokenKind::Eof, self.pos, self.pos));
-        Ok(tokens)
+        Ok(LexOutput {
+            tokens,
+            trivia: self.trivia,
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -629,9 +665,14 @@ impl<'a> Lexer<'a> {
                 self.advance();
             }
             if self.peek() == Some('/') && self.peek_next() == Some('/') {
+                let start = self.pos;
                 while !matches!(self.peek(), None | Some('\n')) {
                     self.advance();
                 }
+                self.trivia.push(Trivia {
+                    kind: TriviaKind::LineComment,
+                    span: Span::new(start as u32, self.pos as u32),
+                });
                 continue;
             }
             if self.peek() == Some('/') && self.peek_next() == Some('*') {
@@ -649,6 +690,10 @@ impl<'a> Lexer<'a> {
                 }
                 self.advance();
                 self.advance();
+                self.trivia.push(Trivia {
+                    kind: TriviaKind::BlockComment,
+                    span: Span::new(start as u32, self.pos as u32),
+                });
                 continue;
             }
             break;
@@ -684,7 +729,6 @@ impl<'a> Lexer<'a> {
     fn make_token(&self, kind: TokenKind, start: usize, end: usize) -> Token {
         Token {
             kind,
-            lexeme: self.source[start..end].to_string(),
             span: Span::new(start as u32, end as u32),
         }
     }
@@ -761,6 +805,7 @@ fn keyword(text: &str) -> Option<Keyword> {
         "await" => Keyword::Await,
         "type" => Keyword::Type,
         "interface" => Keyword::Interface,
+        "enum" => Keyword::Enum,
         "class" => Keyword::Class,
         "extends" => Keyword::Extends,
         "true" => Keyword::True,

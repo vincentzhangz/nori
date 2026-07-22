@@ -2,20 +2,22 @@
 
 ## Project Structure & Module Organization
 
-Nori is a Rust compiler with Bun-managed JavaScript packages. Core compiler code lives in `src/`: `lexer.rs`, `parser.rs`, `ast.rs`, `analyzer.rs`, `codegen.rs`, `lib.rs`, and the CLI entrypoint in `main.rs`. Parser internals are split under `src/parser/`. Rust integration tests live in `tests/compiler_tests.rs`. Example `.nori` fixtures are in `examples/` and should be updated with syntax or codegen changes. JavaScript packages live under `packages/`: `core` runtime, `cli`, `vite-plugin`, and `rspack-plugin`. Reference docs are in `docs/`.
+Nori is a Rust compiler (workspace under `crates/`) with Bun-managed JavaScript packages (`packages/`). Reference docs live in `docs/` — start at [docs/README.md](docs/README.md). Runnable apps: `examples/app` (JS) and `examples/app-ts` (TS). Editor support: [`extensions/nori`](extensions/nori) (syntax + format; see [docs/vscode-extension.md](docs/vscode-extension.md)).
 
 ## Build, Test, and Development Commands
 
-- `cargo test`: runs Rust compiler and CLI tests.
+- `cargo test -p nori` / `cargo test --workspace`: Rust tests.
 - `cargo fmt`: formats Rust code.
-- `cargo clippy --all-targets -- -D warnings`: runs strict Rust linting.
-- `cargo run -- compile examples/Counter.nori`: compiles a fixture.
-- `cargo run -- lex examples/Counter.nori`: prints lexer tokens.
-- `cargo run -- parse examples/Counter.nori`: prints the parsed AST.
-- `bun test`: runs Bun tests, including `packages/core/src/index.test.ts`.
-- `bun run build`: builds/checks all workspace packages.
-- `bun run typecheck`: type-checks all packages.
-- `bun run test`: runs `cargo test && bun test`.
+- `cargo clippy --all-targets -- -D warnings`: strict Rust linting.
+- `cargo run -p nori -- compile examples/Counter.nori`: compile a fixture.
+- `cargo run -p nori -- check examples/Todo.nori`: type-check.
+- `bun test`: Bun package tests.
+- `bun run --cwd examples/app dev`: JS example (port 5173).
+- `bun run --cwd examples/app-ts dev`: TS example (port 5174).
+- `bun run --cwd extensions/nori package`: build the VS Code `.vsix`.
+- `bun run test`: `cargo test && bun test`.
+
+See [docs/getting-started.md](docs/getting-started.md) and [docs/examples.md](docs/examples.md).
 
 ## Coding Style & Naming Conventions
 

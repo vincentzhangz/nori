@@ -15,26 +15,11 @@ export class NoriRspackPlugin {
 
     compiler.options.module ??= {};
     compiler.options.module.rules ??= [];
+    // Nori emits plain JS with h() calls — no JSX/SWC React transform.
     compiler.options.module.rules.push({
       test: include,
       type: "javascript/auto",
       use: [
-        {
-          loader: "builtin:swc-loader",
-          options: {
-            jsc: {
-              parser: {
-                syntax: "ecmascript",
-                jsx: true
-              },
-              transform: {
-                react: {
-                  runtime: "classic"
-                }
-              }
-            }
-          }
-        },
         {
           loader: loaderPath,
           options: { runtimeImport }

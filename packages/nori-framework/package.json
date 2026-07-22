@@ -1,0 +1,29 @@
+{
+  "name": "@nori/framework",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Nori app framework — file router, createApp, Module Federation helpers",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./router": "./src/router.js",
+    "./federation": "./src/federation.js",
+    "./define-config": "./src/define-config.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "bun test src",
+    "typecheck": "node -e \"console.log('@nori/framework OK')\"",
+    "build": "node -e \"console.log('@nori/framework: ESM package')\""
+  },
+  "peerDependencies": {
+    "@nori/core": "^0.1.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

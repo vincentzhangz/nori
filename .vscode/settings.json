@@ -1,0 +1,9 @@
+{
+  "[nori]": {
+    "editor.defaultFormatter": "nori.nori",
+    "editor.formatOnSave": true
+  },
+  "files.associations": {
+    "*.nori": "nori"
+  }
+}
