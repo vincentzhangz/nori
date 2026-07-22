@@ -2,49 +2,60 @@
 
 ## Requirements
 
-- Rust for compiler development.
-- Bun for JavaScript package tests.
+- Rust toolchain for compiler crates
+- Bun for JS packages and examples
 
-## Common Commands
-
-Run Rust tests:
+## Common commands
 
 ```sh
+# Install JS workspace
+bun install
+bun run --cwd packages/core build
+
+# Rust tests / lint / format
+cargo test -p nori
 cargo test --workspace
-```
+cargo clippy --all-targets -- -D warnings
+cargo fmt --workspace
 
-Run Bun tests:
-
-```sh
+# JS tests
 bun test
-```
 
-Run all current tests:
-
-```sh
+# Root combo
 bun run test
 ```
 
-Run strict Rust linting:
+## Run examples while developing
 
 ```sh
-cargo clippy --workspace --all-targets -- -D warnings
+bun run --cwd examples/app dev       # JS  :5173
+bun run --cwd examples/app-ts dev    # TS  :5174
 ```
 
-Format Rust code:
+Full guide: [examples.md](./examples.md) · [getting-started.md](./getting-started.md).
 
-```sh
-cargo fmt --workspace
-```
+## Suggested workflow (compiler change)
 
-## Suggested Workflow
+1. Add or update a `.nori` fixture under `examples/` or `crates/nori/tests/fixtures/`.
+2. Add expectations in `crates/nori/tests/compiler_tests.rs`.
+3. `cargo test -p nori`
+4. `cargo clippy --all-targets -- -D warnings`
+5. If runtime / plugins / framework changed: `bun test`
+6. If docs / public behavior changed: update `docs/` (and this file’s links if needed)
 
-1. Add or update a `.nori` fixture in `examples/`.
-2. Add parser/codegen expectations in `crates/nori/tests/compiler_tests.rs`.
-3. Run `cargo test --workspace`.
-4. Run `cargo clippy --workspace --all-targets -- -D warnings`.
-5. Run `bun test` if runtime behavior changed.
+## Design rules
 
-## Design Rule
+- Prefer **clear diagnostics** over silently accepting unsupported syntax.
+- Keep the compiler **learning-first** and dependency-light (bumpalo allocator is OK; no external JS parser crates).
+- Markup emits **`h()`** from `@nori/core` — do not reintroduce a React-classic JSX handoff unless intentionally reverting that decision.
 
-Prefer clear diagnostics over accepting unsupported syntax incorrectly. Nori intentionally starts as a small syntax subset while the lexer and parser are being built from scratch.
+## Crate map
+
+| Crate | Role |
+| --- | --- |
+| `nori-span` / `nori-allocator` | Spans + bump arena |
+| `nori-lexer` / `nori-parser` / `nori-ast` | Front-end |
+| `nori-analyzer` / `nori-codegen` | Reactivity + emit |
+| `nori-semantic` / `nori-checker` | Check path |
+| `nori-bundler` / `nori-wasm` | Bundle + WASM |
+| `nori` | CLI + integration tests |

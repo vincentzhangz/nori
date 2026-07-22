@@ -1,0 +1,36 @@
+type CounterProps = {
+  label: string;
+};
+
+const count: number = $state(0);
+
+export default function Home(_props: CounterProps = { label: "Count" }) {
+  const label: string = "Count";
+  return (
+    <main class="w-full max-w-md rounded-3xl border border-stone-200 bg-white/90 p-8 shadow-xl shadow-stone-900/5 backdrop-blur">
+      <span class="mb-3 inline-block rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-sky-700">
+        Tailwind CSS
+      </span>
+      <h1 class="mb-2 text-3xl font-semibold tracking-tight text-stone-900">
+        Nori counter (TypeScript)
+      </h1>
+      <p class="mb-6 text-stone-600">
+        Host app is TypeScript + Vite. Utility classes come from Tailwind v4 (
+        <code class="rounded bg-stone-100 px-1 py-0.5 text-sm">src/styles.css</code>
+        ).
+      </p>
+      <div class="flex items-center justify-between gap-4 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3">
+        <p class="m-0 text-lg font-semibold">
+          {label}: {count.value}
+        </p>
+        <button
+          type="button"
+          class="rounded-full bg-sky-600 px-4 py-2.5 font-semibold text-white transition hover:bg-sky-500 active:translate-y-px"
+          onclick={() => (count.value += 1)}
+        >
+          Increment
+        </button>
+      </div>
+    </main>
+  );
+}

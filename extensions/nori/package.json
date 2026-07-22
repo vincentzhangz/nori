@@ -1,0 +1,112 @@
+{
+  "name": "nori",
+  "displayName": "Nori",
+  "description": "Syntax highlighting and formatting for Nori (.nori) files",
+  "version": "0.1.0",
+  "publisher": "nori",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vincentzhangz/nori.git",
+    "directory": "extensions/nori"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
+  "keywords": [
+    "nori",
+    "syntax",
+    "highlighting",
+    "formatter"
+  ],
+  "activationEvents": [
+    "onLanguage:nori"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nori",
+        "aliases": [
+          "Nori",
+          "nori"
+        ],
+        "extensions": [
+          ".nori"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./media/nori-icon-light.svg",
+          "dark": "./media/nori-icon-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nori",
+        "scopeName": "source.nori",
+        "path": "./syntaxes/nori.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Nori",
+      "properties": {
+        "nori.format.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the built-in Nori document formatter (Prettier TypeScript/TSX)."
+        },
+        "nori.format.printWidth": {
+          "type": "number",
+          "default": 80,
+          "description": "Prettier print width for .nori formatting."
+        },
+        "nori.format.tabWidth": {
+          "type": "number",
+          "default": 2,
+          "description": "Prettier tab width for .nori formatting."
+        },
+        "nori.format.singleQuote": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use single quotes when formatting .nori files."
+        },
+        "nori.format.semi": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add semicolons when formatting .nori files."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "nori.formatDocument",
+        "title": "Nori: Format Document"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "nori.formatDocument",
+          "when": "editorLangId == nori"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "vsce package --skip-license",
+    "lint": "node -e \"require('prettier'); console.log('nori extension deps ok')\""
+  },
+  "dependencies": {
+    "prettier": "^3.6.2"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0"
+  }
+}

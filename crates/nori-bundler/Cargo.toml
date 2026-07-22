@@ -1,0 +1,15 @@
+[package]
+name = "nori-bundler"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Scaffold for a Nori-native bundler (module graph, MF protocol)"
+
+[dependencies]
+nori-allocator = { path = "../nori-allocator" }
+nori-lexer = { path = "../nori-lexer" }
+nori-parser = { path = "../nori-parser" }
+nori-ast = { path = "../nori-ast" }
+nori-diagnostic = { path = "../nori-diagnostic" }
+thiserror = "2.0"

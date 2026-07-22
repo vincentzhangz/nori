@@ -1,0 +1,9 @@
+const message = $state("hello from remote");
+
+export default function App() {
+  return (
+    <section>
+      <h1>{message.value}</h1>
+    </section>
+  );
+}

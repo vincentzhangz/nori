@@ -1,67 +1,82 @@
-# Compiler Pipeline
+# Compiler pipeline
 
-Nori compiles `.nori` source through a small compiler pipeline written from scratch.
+Nori compiles `.nori` source through a hand-rolled Rust pipeline (oxc-inspired architecture: arena AST, zero-copy tokens, error recovery).
 
 ```text
-Nori source
-  -> lexer
-  -> parser
-  -> AST
-  -> analyzer
-  -> code generator
-  -> JavaScript
+.nori source
+  → nori-lexer       Token { kind, span }  (+ comment trivia)
+  → nori-parser      Program<'a> in bump arena  (+ ParseResult diagnostics)
+  → nori-analyzer    $state / $derived / $effect, markup → h/fragment imports
+  → nori-codegen     JavaScript (signals + h(...) + type strip)
 ```
+
+Optional side path:
+
+```text
+Program → nori-semantic → nori-checker → diagnostics   (nori check)
+```
+
+## Allocator and spans
+
+- **`nori-allocator`**: bumpalo-backed `Allocator`, `Box<'a, T>`, `Vec<'a, T>`, `Atom<'a>`.
+- **`nori-span`**: `Span { start: u32, end: u32 }`. Line/column come from `SourceMap` when printing diagnostics — not stored on every token.
 
 ## Lexer
 
-The lexer converts source text into tokens with byte spans, line numbers, and columns.
+Zero-copy: tokens do **not** own lexeme strings; callers slice the source with `token.lexeme(source)` / `span.source_text(source)`.
 
-It recognizes:
+Modes:
 
-- JavaScript punctuation and operators.
-- Identifiers, keywords, strings, and numbers.
-- Element tag boundaries.
-- Element text.
-- Element expression containers.
+- Normal script
+- Markup tag / text / expression (JSX-like)
+- Regex vs division via `LexContext`
 
-The lexer has basic element modes so it can distinguish normal script from tag/text/expression contexts.
+Comments are skipped and recorded as trivia (`lex_with_trivia`).
 
 ## Parser
 
-The parser is hand-written. It uses:
+- Recursive descent for programs, statements, classes, imports/exports, markup.
+- Pratt binding-power parsing for expressions and a second layer for `TSType`.
+- Arena allocation: `Parser` holds `&Allocator` + `&str` source.
+- **Error recovery:** on a statement error, records a `Diagnostic`, synchronizes (semicolon / `}` / statement keywords), continues. `parse_program` returns `ParseResult { program, diagnostics }`.
 
-- Recursive descent for programs, statements, functions, blocks, variable declarations, and component markup.
-- Pratt-style precedence parsing for expressions.
-- A SWC-inspired token cursor with checkpoints for speculative parsing.
-- A `Syntax::nori()` configuration entrypoint for Nori's TypeScript and markup subset.
+## AST
 
-The parser produces the custom AST in `crates/nori-ast/src/lib.rs`.
+Arena-allocated nodes in `nori-ast` with lifetime `'a`. Includes:
+
+- Statements / expressions / patterns / classes / markup
+- Real TypeScript type nodes (`TSType`, aliases, interfaces, enums, modules)
+- Hand-written `Visit` / `VisitMut` + `AstKind`
 
 ## Analyzer
 
-The analyzer walks the AST and records:
+Records reactive bindings and decides which `@nori/core` symbols to import (`signal`, `computed`, `effect`, `h`, `fragment`).
 
-- Signal variables created by `$state`.
-- Computed variables created by `$derived`.
-- Effects created by `$effect`.
-- Scope-aware `.value` reads and writes for reactive bindings.
-- Runtime symbols needed in output.
+## Code generator
 
-This is where future semantic checks should live.
+Emits JavaScript for a bundler:
 
-## Code Generator
+| Input | Output |
+| --- | --- |
+| `$state(x)` | `signal(x)` |
+| `$derived(expr)` | `computed(() => expr)` |
+| `$effect(fn)` | `effect(fn)` |
+| Markup | `h("div", props, ...children)` |
+| Expr children in markup | `() => ...` (fine-grained updates) |
+| Types / interfaces | erased |
+| `enum` | object IIFE (const enum inlined when simple) |
 
-The code generator emits JavaScript for a bundler to finish.
+## Semantic + checker
 
-It currently:
+- **`nori-semantic`**: scope tree, symbols, references.
+- **`nori-checker`**: assignability, structural types, narrowing, simple generics/conditionals, component prop checks (`nori check`).
 
-- Converts `$state` to `signal`.
-- Converts `$derived` to `computed(() => ...)`.
-- Converts `$effect` to `effect`.
-- Inserts a runtime import when needed.
-- Strips supported type annotations.
-- Preserves component markup for Vite, Rspack, or another bundler.
+Compile / Vite emit keeps `type_check` **off** by default so type errors don’t block JS generation. Use `nori check` for diagnostics.
 
-## Why Preserve Markup?
+## Bundler (scaffold)
 
-V1 focuses on learning the compiler pipeline and Nori-specific reactivity. Markup lowering is a separate compiler problem, so Nori leaves component markup intact and lets existing bundlers lower it.
+`nori-bundler` + `nori bundle` resolve relative imports, build a module graph, and concat (or multi-file emit) ESM. Not a full Rspack replacement yet — see `crates/nori-bundler/README.md`.
+
+## WASM
+
+`crates/nori-wasm` exposes `compile` via wasm-bindgen. `packages/compiler-wasm` (`@nori/compiler`) prefers WASM when built, otherwise falls back to the CLI. The Vite plugin tries `@nori/compiler` first.

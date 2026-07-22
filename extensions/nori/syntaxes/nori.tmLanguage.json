@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nori",
+  "scopeName": "source.nori",
+  "patterns": [
+    {
+      "name": "support.function.nori-reactivity",
+      "match": "\\$(?:state|derived|effect)\\b"
+    },
+    {
+      "name": "keyword.control.nori.load",
+      "match": "\\b(?:load|actions)\\b(?=\\s*[=(])"
+    },
+    {
+      "include": "source.tsx"
+    }
+  ],
+  "repository": {}
+}

@@ -30,6 +30,7 @@ export default function Counter() {
 `;
     const result = runNoriStdinTest(source, ["--runtime-import", "@nori/core", "input.nori"]);
     expect(result).toContain("signal(0)");
+    expect(result).toContain("h(");
     expect(result).toContain("export default function Counter()");
   });
 
@@ -45,6 +46,7 @@ export default function Counter() {
     expect(result).toContain('from "@nori/core"');
     expect(result).toContain("signal");
     expect(result).toContain("computed");
+    expect(result).toContain("h(");
   });
 
   it("should strip type annotations", () => {
@@ -59,6 +61,7 @@ export default function Counter(): JSX.Element {
     expect(result).not.toContain("type Count");
     expect(result).not.toContain(": number");
     expect(result).not.toContain(": JSX.Element");
+    expect(result).toContain("h(");
   });
 
   it("should build the example app through Vite", async () => {
@@ -84,5 +87,6 @@ export default function Counter(): JSX.Element {
     expect(app?.code).toContain("signal(0)");
     expect(app?.code).toContain("computed");
     expect(app?.code).toContain("Counter");
+    expect(app?.code).toContain("h(");
   });
 });

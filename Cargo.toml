@@ -1,11 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/nori-allocator",
+    "crates/nori-span",
     "crates/nori-ast",
     "crates/nori-lexer",
     "crates/nori-diagnostic",
     "crates/nori-parser",
     "crates/nori-analyzer",
     "crates/nori-codegen",
+    "crates/nori-semantic",
+    "crates/nori-checker",
     "crates/nori",
+    "crates/nori-wasm",
+    "crates/nori-bundler",
 ]

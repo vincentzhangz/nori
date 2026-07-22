@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nori_ast::{
-    BlockStmt, DestructuringKind, DestructuringPattern, Expr, ExprKind, FunctionDecl,
-    MarkupAttribute, MarkupChild, MarkupNode, Param, Program, Stmt, VarDecl, VarDeclarator,
-    VarKind,
+    ArrowBody, BlockStmt, ClassMember, Expr, ExprKind, ForInit, FunctionDecl, MarkupAttribute,
+    MarkupChild, MarkupNode, Param, Pattern, Program, Stmt, VarDecl, VarDeclarator, VarKind,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,34 +19,32 @@ pub struct Analysis {
 }
 
 impl Analysis {
-    pub fn from_program(source: &str, program: &Program) -> Self {
-        Analyzer::new(source).analyze(program)
+    pub fn from_program(_source: &str, program: &Program<'_>) -> Self {
+        Analyzer::new().analyze(program)
     }
 }
 
-struct Analyzer<'source> {
-    source: &'source str,
+struct Analyzer {
     analysis: Analysis,
     scopes: Vec<Scope>,
 }
 
-impl<'source> Analyzer<'source> {
-    fn new(source: &'source str) -> Self {
+impl Analyzer {
+    fn new() -> Self {
         Self {
-            source,
             analysis: Analysis::default(),
             scopes: vec![Scope::function()],
         }
     }
 
-    fn analyze(mut self, program: &Program) -> Analysis {
+    fn analyze(mut self, program: &Program<'_>) -> Analysis {
         for stmt in &program.body {
             self.visit_stmt(stmt);
         }
         self.analysis
     }
 
-    fn visit_stmt(&mut self, stmt: &Stmt) {
+    fn visit_stmt(&mut self, stmt: &Stmt<'_>) {
         match stmt {
             Stmt::Var(var) => self.visit_var(var),
             Stmt::Function(function) | Stmt::ExportDefaultFunction(function) => {
@@ -66,11 +63,9 @@ impl<'source> Analyzer<'source> {
             }
             Stmt::Class(class) => {
                 self.declare_lexical(&class.name, Binding::Local);
-                self.push_block_scope();
-                for stmt in &class.body {
-                    self.visit_stmt(stmt);
+                for member in &class.members {
+                    self.visit_class_member(member);
                 }
-                self.pop_scope();
             }
             Stmt::Try(stmt) => {
                 self.visit_block(&stmt.body);
@@ -90,20 +85,73 @@ impl<'source> Analyzer<'source> {
                 self.visit_expr(&stmt.iterable);
                 self.push_block_scope();
                 self.declare_var(stmt.variable, &stmt.name, Binding::Local);
-                self.visit_block(&stmt.body);
+                self.visit_stmt(&stmt.body);
                 self.pop_scope();
             }
-            Stmt::Import(raw) => {
-                let span = &raw.span;
-                if let Some(import_path) = extract_import_path(self.source, span.start, span.end) {
-                    if import_path.ends_with(".nori") {
-                        self.analysis.nori_imports.push(import_path);
-                    } else if !import_path.starts_with('.') && !import_path.starts_with('@') {
-                        self.analysis.imports.push(import_path);
+            Stmt::ClassicFor(stmt) => {
+                self.push_block_scope();
+                if let Some(init) = &stmt.init {
+                    match init {
+                        ForInit::Var(var) => self.visit_var(var),
+                        ForInit::Expr(expr) => self.visit_expr(expr),
+                    }
+                }
+                if let Some(condition) = &stmt.condition {
+                    self.visit_expr(condition);
+                }
+                if let Some(update) = &stmt.update {
+                    self.visit_expr(update);
+                }
+                self.visit_stmt(&stmt.body);
+                self.pop_scope();
+            }
+            Stmt::While(stmt) => {
+                self.visit_expr(&stmt.condition);
+                self.visit_stmt(&stmt.body);
+            }
+            Stmt::DoWhile(stmt) => {
+                self.visit_stmt(&stmt.body);
+                self.visit_expr(&stmt.condition);
+            }
+            Stmt::Switch(stmt) => {
+                self.visit_expr(&stmt.discriminant);
+                for case in &stmt.cases {
+                    if let Some(test) = &case.test {
+                        self.visit_expr(test);
+                    }
+                    for s in &case.consequent {
+                        self.visit_stmt(s);
                     }
                 }
             }
-            Stmt::TypeOnly(_) | Stmt::Return(None, _) | Stmt::Raw(_) => {}
+            Stmt::Throw(stmt) => {
+                self.visit_expr(&stmt.argument);
+            }
+            Stmt::Label(stmt) => {
+                self.visit_stmt(&stmt.body);
+            }
+            Stmt::Debugger(_) => {}
+            Stmt::With(stmt) => {
+                self.visit_expr(&stmt.object);
+                self.visit_stmt(&stmt.body);
+            }
+            Stmt::Import(import) => {
+                if import.source.ends_with(".nori") {
+                    self.analysis.nori_imports.push(import.source.to_string());
+                } else if !import.source.starts_with('.') && !import.source.starts_with('@') {
+                    self.analysis.imports.push(import.source.to_string());
+                }
+            }
+            Stmt::Export(_)
+            | Stmt::TypeOnly(_)
+            | Stmt::TypeAlias(_)
+            | Stmt::Interface(_)
+            | Stmt::Enum(_)
+            | Stmt::Module(_)
+            | Stmt::Return(None, _)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Raw(_) => {}
         }
     }
 
@@ -117,6 +165,46 @@ impl<'source> Analyzer<'source> {
             self.visit_param(param);
         }
         self.visit_block_body(&function.body);
+        self.pop_scope();
+    }
+
+    fn visit_class_member(&mut self, member: &ClassMember) {
+        match member {
+            ClassMember::Field(field) => {
+                if let Some(computed) = &field.computed {
+                    self.visit_expr(computed);
+                }
+                if let Some(value) = &field.value {
+                    self.visit_expr(value);
+                }
+            }
+            ClassMember::Constructor(constructor) => {
+                self.visit_callable_body(&constructor.params, &constructor.body);
+            }
+            ClassMember::Method(method) => {
+                if let Some(computed) = &method.computed {
+                    self.visit_expr(computed);
+                }
+                self.visit_callable_body(&method.params, &method.body);
+            }
+            ClassMember::Accessor(accessor) => {
+                if let Some(computed) = &accessor.computed {
+                    self.visit_expr(computed);
+                }
+                self.visit_callable_body(&accessor.params, &accessor.body);
+            }
+            ClassMember::StaticBlock(block) => {
+                self.visit_block(&block.body);
+            }
+        }
+    }
+
+    fn visit_callable_body(&mut self, params: &[Param], body: &BlockStmt) {
+        self.push_function_scope();
+        for param in params {
+            self.visit_param(param);
+        }
+        self.visit_block_body(body);
         self.pop_scope();
     }
 
@@ -146,11 +234,11 @@ impl<'source> Analyzer<'source> {
 
             match binding {
                 Binding::Signal => {
-                    self.analysis.signals.insert(declarator.name.clone());
+                    self.analysis.signals.insert(declarator.name.to_string());
                     self.analysis.runtime_symbols.insert("signal".to_string());
                 }
                 Binding::Computed => {
-                    self.analysis.computeds.insert(declarator.name.clone());
+                    self.analysis.computeds.insert(declarator.name.to_string());
                     self.analysis.runtime_symbols.insert("computed".to_string());
                 }
                 Binding::Local => {}
@@ -172,7 +260,7 @@ impl<'source> Analyzer<'source> {
         }
 
         match &expr.kind {
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call { callee, args, .. } => {
                 if let ExprKind::Ident(name) = &callee.kind {
                     match name.as_str() {
                         "$state" => {
@@ -193,7 +281,22 @@ impl<'source> Analyzer<'source> {
                     self.visit_expr(arg);
                 }
             }
+            ExprKind::New { callee, args, .. } => {
+                self.visit_expr(callee);
+                for arg in args {
+                    self.visit_expr(arg);
+                }
+            }
+            ExprKind::Delete(expr) | ExprKind::Void(expr) | ExprKind::Typeof(expr) => {
+                self.visit_expr(expr)
+            }
             ExprKind::Unary { expr, .. } => self.visit_expr(expr),
+            ExprKind::Update { expr, .. } => {
+                self.visit_expr_with_access(expr, ValueAccess::ReadWrite);
+            }
+            ExprKind::TypeErasure { expr, .. } => {
+                self.visit_expr_with_access(expr, access);
+            }
             ExprKind::Binary { left, right, .. } => {
                 self.visit_expr(left);
                 self.visit_expr(right);
@@ -212,11 +315,23 @@ impl<'source> Analyzer<'source> {
                 self.visit_expr(alternate);
             }
             ExprKind::Member { object, .. } => self.visit_expr(object),
-            ExprKind::Index { object, index } => {
+            ExprKind::Index { object, index, .. } => {
                 self.visit_expr(object);
                 self.visit_expr(index);
             }
-            ExprKind::Arrow { body, .. } => self.visit_expr(body),
+            ExprKind::Arrow { body, .. } => match body {
+                ArrowBody::Expression(expr) => self.visit_expr(expr),
+                ArrowBody::Block(block) => self.visit_block(block),
+            },
+            ExprKind::TemplateLiteral { quasis: _, exprs } => {
+                for expr in exprs {
+                    self.visit_expr(expr);
+                }
+            }
+            ExprKind::TaggedTemplate { tag, quasi } => {
+                self.visit_expr(tag);
+                self.visit_expr(quasi);
+            }
             ExprKind::Await(expr) => self.visit_expr(expr),
             ExprKind::Spread { expr } => self.visit_expr(expr),
             ExprKind::Array(items) => {
@@ -224,18 +339,38 @@ impl<'source> Analyzer<'source> {
                     self.visit_expr(item);
                 }
             }
+            ExprKind::Object(properties) => {
+                for prop in properties {
+                    self.visit_expr(&prop.value);
+                }
+            }
+            ExprKind::Yield { value, .. } => {
+                if let Some(expr) = value {
+                    self.visit_expr(expr);
+                }
+            }
+            ExprKind::Sequence(exprs) => {
+                for expr in exprs {
+                    self.visit_expr(expr);
+                }
+            }
+            ExprKind::Import(expr) => self.visit_expr(expr),
             ExprKind::Markup(node) => self.visit_markup_node(node),
-            ExprKind::Ident(_)
+            ExprKind::RegExp { .. }
+            | ExprKind::Ident(_)
             | ExprKind::Number(_)
+            | ExprKind::BigInt(_)
             | ExprKind::String(_)
             | ExprKind::Bool(_)
             | ExprKind::Null
-            | ExprKind::Object
+            | ExprKind::This
+            | ExprKind::MetaProperty { .. }
             | ExprKind::Raw => {}
         }
     }
 
     fn visit_markup_node(&mut self, node: &MarkupNode) {
+        self.analysis.runtime_symbols.insert("h".to_string());
         match node {
             MarkupNode::Element(element) => {
                 for attribute in &element.attributes {
@@ -249,7 +384,10 @@ impl<'source> Analyzer<'source> {
                 }
                 self.visit_markup_children(&element.children);
             }
-            MarkupNode::Fragment { children, .. } => self.visit_markup_children(children),
+            MarkupNode::Fragment { children, .. } => {
+                self.analysis.runtime_symbols.insert("fragment".to_string());
+                self.visit_markup_children(children);
+            }
         }
     }
 
@@ -271,18 +409,33 @@ impl<'source> Analyzer<'source> {
         }
     }
 
-    fn declare_pattern(&mut self, kind: VarKind, pattern: &DestructuringPattern) {
-        match &pattern.kind {
-            DestructuringKind::Array(names, _) => {
-                for name in names {
-                    self.declare_var(kind, name, Binding::Local);
+    fn declare_pattern(&mut self, kind: VarKind, pattern: &Pattern) {
+        match pattern {
+            Pattern::Ident(name) => self.declare_var(kind, name, Binding::Local),
+            Pattern::Array { elements, rest, .. } => {
+                for element in elements.iter().flatten() {
+                    self.declare_pattern(kind, element);
+                }
+                if let Some(rest) = rest {
+                    self.declare_pattern(kind, rest);
                 }
             }
-            DestructuringKind::Object(props, _) => {
-                for (name, _) in props {
-                    self.declare_var(kind, name, Binding::Local);
+            Pattern::Object {
+                properties, rest, ..
+            } => {
+                for prop in properties {
+                    if let Some(value) = &prop.value {
+                        self.declare_pattern(kind, value);
+                    } else {
+                        self.declare_var(kind, &prop.key, Binding::Local);
+                    }
+                }
+                if let Some(rest) = rest {
+                    self.declare_pattern(kind, rest);
                 }
             }
+            Pattern::Rest(pattern) => self.declare_pattern(kind, pattern),
+            Pattern::Assign { left, .. } => self.declare_pattern(kind, left),
         }
     }
 
@@ -312,17 +465,22 @@ impl<'source> Analyzer<'source> {
             .insert(name.to_string(), binding);
     }
 
-    fn reactive_value_name<'expr>(&self, expr: &'expr Expr) -> Option<&'expr str> {
-        let ExprKind::Member { object, property } = &expr.kind else {
+    fn reactive_value_name<'expr, 'ast>(&self, expr: &'expr Expr<'ast>) -> Option<&'expr str> {
+        let expr = erase_type_wrappers(expr);
+        let ExprKind::Member {
+            object, property, ..
+        } = &expr.kind
+        else {
             return None;
         };
-        if property != "value" {
+        if property.as_str() != "value" {
             return None;
         }
+        let object = erase_type_wrappers(object);
         let ExprKind::Ident(name) = &object.kind else {
             return None;
         };
-        self.is_reactive(name).then_some(name)
+        self.is_reactive(name.as_str()).then_some(name.as_str())
     }
 
     fn is_reactive(&self, name: &str) -> bool {
@@ -405,15 +563,6 @@ impl ValueAccess {
     }
 }
 
-fn extract_import_path(source: &str, start: usize, end: usize) -> Option<String> {
-    let import_text = source.get(start..end)?;
-    let after_from = import_text.strip_prefix("import")?.split("from").nth(1)?;
-    let after_from = after_from.trim();
-    let quote = after_from.chars().next()?;
-    let path_end = after_from[1..].find(quote)? + 2;
-    Some(after_from[..path_end].to_string())
-}
-
 fn reactive_binding(declarator: &VarDeclarator) -> Binding {
     let Some(init) = &declarator.init else {
         return Binding::Local;
@@ -433,12 +582,20 @@ fn assignment_access(op: &str) -> ValueAccess {
     }
 }
 
-pub fn primitive_call_name(expr: &Expr) -> Option<&str> {
+pub fn primitive_call_name<'a>(expr: &'a Expr<'_>) -> Option<&'a str> {
+    let expr = erase_type_wrappers(expr);
     let ExprKind::Call { callee, .. } = &expr.kind else {
         return None;
     };
     let ExprKind::Ident(name) = &callee.kind else {
         return None;
     };
-    matches!(name.as_str(), "$state" | "$derived" | "$effect").then_some(name)
+    matches!(name.as_str(), "$state" | "$derived" | "$effect").then_some(name.as_str())
+}
+
+fn erase_type_wrappers<'a, 'ast>(mut expr: &'a Expr<'ast>) -> &'a Expr<'ast> {
+    while let ExprKind::TypeErasure { expr: inner, .. } = &expr.kind {
+        expr = inner;
+    }
+    expr
 }

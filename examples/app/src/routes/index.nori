@@ -1,0 +1,19 @@
+const count = $state(0);
+
+export default function Home() {
+  return (
+    <main class="page">
+      <span class="badge">Vanilla CSS</span>
+      <h1>Nori counter (JavaScript)</h1>
+      <p class="lede">
+        Host app is plain JS + Vite. Styles come from <code>src/styles.css</code>.
+      </p>
+      <div class="counter-panel">
+        <p class="count">Count: {count.value}</p>
+        <button class="btn" type="button" onclick={() => (count.value += 1)}>
+          Increment
+        </button>
+      </div>
+    </main>
+  );
+}

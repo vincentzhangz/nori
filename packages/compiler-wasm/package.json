@@ -1,0 +1,26 @@
+{
+  "name": "@nori/compiler",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "In-process Nori compiler (WASM via wasm-pack, with CLI fallback)",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "pkg",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/nori-wasm --target bundler --out-dir ../../packages/compiler-wasm/pkg --release",
+    "build": "bun run build:wasm",
+    "check": "cargo check -p nori-wasm",
+    "typecheck": "node -e \"console.log('@nori/compiler: JS fallback; run build:wasm for typed pkg')\"",
+    "test": "bun test src"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

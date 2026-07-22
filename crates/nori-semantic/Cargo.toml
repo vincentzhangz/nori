@@ -1,0 +1,15 @@
+[package]
+name = "nori-semantic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+nori-ast = { path = "../nori-ast" }
+nori-allocator = { path = "../nori-allocator" }
+nori-span = { path = "../nori-span" }
+
+[dev-dependencies]
+nori-lexer = { path = "../nori-lexer" }
+nori-parser = { path = "../nori-parser" }

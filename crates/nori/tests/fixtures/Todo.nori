@@ -3,7 +3,7 @@ type Todo = {
   title: string;
 };
 
-const todos: Todo[] = $state([]);
+const todos = $state<Todo[]>([] satisfies Todo[]);
 const draft = $state("");
 
 function addTodo(): void {

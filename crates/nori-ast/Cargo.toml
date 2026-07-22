@@ -6,3 +6,5 @@ rust-version = "1.85"
 license = "MIT"
 
 [dependencies]
+nori-span = { path = "../nori-span" }
+nori-allocator = { path = "../nori-allocator" }
